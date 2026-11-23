@@ -2,7 +2,7 @@
   display: none !important;
 }
 
-/* The highlighted translation and underline mark the pressed state. */
+/* The underline marks the pressed state. */
 #movie_player .bce-toggle {
   position: relative;
   box-sizing: border-box;
@@ -22,10 +22,8 @@
 }
 
 #movie_player .bce-toggle svg { display: block; pointer-events: none; }
-#movie_player .bce-toggle .bce-toggle-translation { transition: fill 0.15s ease; }
 #movie_player .bce-toggle:hover { opacity: 1; }
 #movie_player .bce-toggle[aria-pressed="true"] { opacity: 1; }
-#movie_player .bce-toggle[aria-pressed="true"] .bce-toggle-translation { fill: #73e5b3; }
 
 #movie_player .bce-toggle::after {
   content: "";
@@ -35,7 +33,7 @@
   width: 20px;
   height: 3px;
   border-radius: 2px;
-  background: #73e5b3;
+  background: currentColor;
   transform: translateX(-50%) scaleX(0);
   transition: transform 0.15s ease;
 }

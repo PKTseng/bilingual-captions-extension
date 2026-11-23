@@ -29,7 +29,6 @@
     return item;
   }
 
-  // The lower subtitle band highlights the translation when enabled.
   // Built with createElementNS because YouTube enforces Trusted Types.
   function svgElement(tag, attributes) {
     const item = document.createElementNS('http://www.w3.org/2000/svg', tag);
@@ -39,15 +38,16 @@
   const toggle = element('button', 'bce-toggle');
   toggle.type = 'button';
   const toggleIcon = svgElement('svg', {
-    viewBox: '0 0 24 24', width: '24', height: '24', fill: 'currentColor',
-    'fill-rule': 'evenodd', 'aria-hidden': 'true',
+    viewBox: '0 0 24 24', width: '24', height: '24', fill: 'none', stroke: 'currentColor',
+    'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true',
   });
+  // Tabler Icons Subtitles, MIT (icons/LICENSE-tabler.txt).
   toggleIcon.append(
-    svgElement('path', { d: 'M5 5h14a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Zm1 2v2h7V7Zm9 0v2h3V7Z' }),
-    svgElement('path', {
-      d: 'M5 13h14a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2Zm1 2v2h11v-2Z',
-      class: 'bce-toggle-translation',
-    }),
+    svgElement('path', { d: 'M18 5a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3l12 0' }),
+    svgElement('path', { d: 'M7 15h5' }),
+    svgElement('path', { d: 'M15 15h2' }),
+    svgElement('path', { d: 'M17 12h-3' }),
+    svgElement('path', { d: 'M11 12h-1' }),
   );
   toggle.append(toggleIcon);
   const overlay = element('div', 'bce-overlay');
