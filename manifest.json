@@ -33,6 +33,8 @@
         "subtitle-parser.js",
         "transcript.js",
         "page-bridge.js",
+        "settings.js",
+        "ai-translator.js",
         "content.js"
       ],
       "css": [

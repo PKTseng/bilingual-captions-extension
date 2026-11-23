@@ -11,6 +11,9 @@
   const LIVE_GAP_MS = 900;
   const { sentenceCues, readTranscript, openTranscript } = globalThis.bceTranscript;
   const { requestTimedText, cachedTimedText } = globalThis.bcePageBridge;
+  const { TIERS, TIER_LABELS, SETTINGS_KEY, mergeSettings } = globalThis.bceSettings;
+  const { createAiTranslator } = globalThis.bceAiTranslator;
+  let tier = 'basic';
   let videoId;
   let player;
   let job;
@@ -77,7 +80,15 @@
   const later = element('button', 'bce-import', '延後 0.5 秒');
   earlier.type = 'button';
   later.type = 'button';
-  timing.append(sourceLabel, earlier, later);
+  const tierRow = element('div', 'bce-tiers');
+  const tierButtons = TIERS.map((name) => {
+    const button = element('button', 'bce-import', TIER_LABELS[name]);
+    button.type = 'button';
+    button.dataset.tier = name;
+    return button;
+  });
+  tierRow.append(...tierButtons);
+  timing.append(sourceLabel, earlier, later, tierRow);
   timing.hidden = true;
   notice.append(message, importButton, fileInput, timing);
   notice.hidden = true;
@@ -98,7 +109,11 @@
     const source = job?.source ?? importedSource;
     const timed = job?.cues.length || imported.length;
     const wordTimed = job ? job.wordTimed : imported.some((cue) => cue.marks?.length);
-    sourceLabel.textContent = source ? `字幕來源：${source}${timed ? ` · ${label} · ${wordTimed ? '含原始字詞時間碼' : '字詞高亮為估算'}` : ''}` : '尚未選擇字幕來源';
+    const sourceText = source ? `字幕來源：${source}${timed ? ` · ${label} · ${wordTimed ? '含原始字詞時間碼' : '字詞高亮為估算'}` : ''}` : '尚未選擇字幕來源';
+    // A job running the built-in translator on an AI tier has fallen back.
+    const inUse = job?.translator && job.translator.kind !== 'ai' ? 'basic' : tier;
+    sourceLabel.textContent = `${sourceText} · 翻譯：${TIER_LABELS[inUse]}`;
+    for (const button of tierButtons) button.setAttribute('aria-pressed', String(button.dataset.tier === tier));
     earlier.hidden = later.hidden = !timed;
     earlier.disabled = advanceSeconds >= 10;
     later.disabled = advanceSeconds <= -10;
@@ -592,23 +607,137 @@
 
   async function translateCaption(active, text) {
     const controller = new AbortController();
+    const translator = active.translator;
     active.inFlight = { text, controller };
     try {
-      const result = await active.translator.translate(text, { signal: controller.signal });
+      const result = await translator.translate(text, { signal: controller.signal });
       if (job !== active || controller.signal.aborted || idFromUrl() !== videoId) return;
       if (cache.size >= 4000) cache.delete(cache.keys().next().value);
       cache.set(text, result);
       if (text === currentText || (!active.cues.length && text === active.live.shown)) {
         showTranslation(result);
       }
-    } catch {
-      if (job === active && !controller.signal.aborted && idFromUrl() === videoId) {
-        stop(false);
-        setNotice('翻譯中斷，請再按一次 EN／中。');
+    } catch (error) {
+      if (job !== active || controller.signal.aborted || error?.name === 'AbortError'
+        || idFromUrl() !== videoId || translator !== active.translator) return;
+      if (translator.kind === 'ai' && globalThis.Translator) {
+        void fallBack(active, error);
+        return;
       }
+      stop(false);
+      setNotice('翻譯中斷，請再按一次 EN／中。');
     } finally {
       active.inFlight = undefined;
       if (job === active) refresh();
+    }
+  }
+
+  // Built-in translators have no `kind`; AI ones say `kind: 'ai'`.
+  async function createTranslator(active, wanted) {
+    if (wanted !== 'basic') {
+      return createAiTranslator({
+        tier: wanted,
+        getSentences: () => active.cues.map((cue) => cue.text),
+        // An orphaned copy (after an extension reload) throws synchronously
+        // here; async turns that into a rejection, so it falls back.
+        send: async (payload) => chrome.runtime.sendMessage(payload),
+      });
+    }
+    return Translator.create({
+      ...LANGUAGES,
+      signal: active.controller.signal,
+      monitor(download) {
+        // Quiet once another translator took over (a tier switch mid-download).
+        download.addEventListener('downloadprogress', (event) => {
+          if (job === active && !active.translator) setNotice(`下載語言模型 ${Math.round(event.loaded * 100)}%`);
+        });
+      }
+    });
+  }
+
+  // Replaces the job's translator. Until the new one is ready there is none,
+  // so refresh() skips translating; a newer request (tier switch, fallback)
+  // or a different job supersedes this one, which then resolves to false.
+  async function installTranslator(active, wanted) {
+    const request = {};
+    active.translatorRequest = request;
+    active.inFlight?.controller.abort();
+    active.translator?.destroy();
+    active.translator = undefined;
+    const current = () => job === active && active.translatorRequest === request;
+    try {
+      const translator = await createTranslator(active, wanted);
+      if (!current()) {
+        translator.destroy();
+        return false;
+      }
+      active.translator = translator;
+      return true;
+    } catch (error) {
+      if (current()) throw error;
+      return false;
+    }
+  }
+
+  async function fallBack(active, error) {
+    cache.clear();
+    const text = error?.code === 'no-key'
+      ? '請先在設定頁填入 OpenRouter／Gemini 的 API key，已改用內建翻譯。'
+      : 'AI 暫時無法使用，已改用內建翻譯。';
+    setNotice(text);
+    try {
+      if (!(await installTranslator(active, 'basic'))) return;
+      setNotice(text);
+      refresh();
+    } catch {
+      stop(false);
+      setNotice('翻譯中斷，請再按一次 EN／中。');
+    }
+  }
+
+  async function switchTier(next) {
+    tier = next;
+    cache.clear();
+    if (!timing.hidden) showTiming();
+    const active = job;
+    if (!active) return;
+    if (next === 'basic' && !globalThis.Translator) {
+      stop(false);
+      setNotice('這個 Chrome 環境無法使用內建翻譯。');
+      return;
+    }
+    try {
+      if (!(await installTranslator(active, next))) return;
+      if (!timing.hidden) showTiming();
+      refresh();
+    } catch {
+      stop(false);
+      setNotice('翻譯中斷，請再按一次 EN／中。');
+    }
+  }
+
+  async function chooseTier(next) {
+    try {
+      const stored = await chrome.storage.local.get(SETTINGS_KEY);
+      await chrome.storage.local.set({ [SETTINGS_KEY]: { ...mergeSettings(stored[SETTINGS_KEY]), tier: next } });
+    } catch {
+      setNotice('無法儲存翻譯等級，請重新整理頁面。');
+    }
+  }
+
+  function onSettingsChanged(changes, areaName) {
+    if (retired || areaName !== 'local' || !changes[SETTINGS_KEY]) return;
+    const next = mergeSettings(changes[SETTINGS_KEY].newValue).tier;
+    if (next !== tier) void switchTier(next);
+  }
+
+  async function loadTier() {
+    try {
+      const stored = await chrome.storage.local.get(SETTINGS_KEY);
+      const next = mergeSettings(stored[SETTINGS_KEY]).tier;
+      if (!retired && next !== tier) void switchTier(next);
+    } catch {
+      // Orphaned copy: keep the built-in translator.
     }
   }
 
@@ -648,7 +777,7 @@
       setNotice('播放器目前沒有可用的 CC。可匯入從 DownSub 下載的英文 SRT。');
       return;
     }
-    if (!globalThis.Translator) {
+    if (tier === 'basic' && !globalThis.Translator) {
       stop(false);
       setNotice('這個 Chrome 環境無法使用內建翻譯。');
       return;
@@ -668,25 +797,13 @@
     };
     job = active;
     updateToggle();
-    setNotice('正在準備 Chrome 內建翻譯…');
+    setNotice(tier === 'basic' ? '正在準備 Chrome 內建翻譯…' : `正在準備 AI 翻譯（${TIER_LABELS[tier]}）…`);
     player.classList.add('bce-replaces-native');
     if (fetchingTimed) void loadTimedText(active);
     refresh();
 
     try {
-      active.translator = await Translator.create({
-        ...LANGUAGES,
-        signal: active.controller.signal,
-        monitor(download) {
-          download.addEventListener('downloadprogress', (event) => {
-            if (job === active) setNotice(`下載語言模型 ${Math.round(event.loaded * 100)}%`);
-          });
-        }
-      });
-      if (job !== active) {
-        active.translator.destroy();
-        return;
-      }
+      if (!(await installTranslator(active, tier))) return;
       setNotice(active.cues.length
         ? '已取得時間碼，字幕會跟著影片時間切換。'
         : '播放影片測試。若原文不是英文，請在 YouTube 字幕設定選英文。');
@@ -711,6 +828,11 @@
   });
   earlier.addEventListener('click', () => shiftTiming(0.5));
   later.addEventListener('click', () => shiftTiming(-0.5));
+  // The switch itself happens in onSettingsChanged, so the options page and
+  // other tabs follow the same tier.
+  for (const button of tierButtons) {
+    button.addEventListener('click', () => void chooseTier(button.dataset.tier));
+  }
   importButton.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', async () => {
     const file = fileInput.files[0];
@@ -739,6 +861,7 @@
   document.addEventListener('yt-navigate-finish', syncPage);
   document.addEventListener('loadedmetadata', syncPage, true);
   document.addEventListener('seeking', resetPosition, true);
+  chrome.storage.onChanged.addListener(onSettingsChanged);
   // A short poll catches caption mutations and controls replaced by YouTube.
   const timer = setInterval(() => {
     syncPage();
@@ -751,6 +874,11 @@
   document.addEventListener('bce-takeover', () => {
     retired = true;
     clearInterval(timer);
+    try {
+      chrome.storage.onChanged.removeListener(onSettingsChanged);
+    } catch {
+      // Orphaned copy: its listener no longer fires anyway.
+    }
     stop();
     toggle.remove();
     overlay.remove();
@@ -759,4 +887,5 @@
 
   updateToggle();
   syncPage();
+  void loadTier();
 })();
