@@ -1,0 +1,781 @@
+(() => {
+  'use strict';
+
+  const LANGUAGES = { sourceLanguage: 'en', targetLanguage: 'zh-Hant' };
+  const NATIVE_CAPTIONS = '.ytp-caption-window-container';
+  const CAPTION_LINES = '.caption-visual-line';
+  const cache = new Map();
+  const SENTENCE_END = /[.!?]["'”’)\]]*$/;
+  const sentenceSegmenter = new Intl.Segmenter('en', { granularity: 'sentence' });
+  const LIVE_GAP_MS = 900;
+  const TRANSCRIPT_ROWS = 'ytd-transcript-segment-renderer, transcript-segment-view-model, yt-transcript-segment-view-model';
+  let videoId;
+  let player;
+  let job;
+  let imported = [];
+  let currentText = '';
+  let restoreCc;
+  let advanceSeconds = 0;
+  let importedSource = '';
+  let displayedCue;
+  let wordElements = [];
+  let timedCache;
+  let requestCounter = 0;
+  const pendingTracks = new Map();
+  const tokenWaiters = new Set();
+
+  function element(tag, className, text) {
+    const item = document.createElement(tag);
+    item.className = className;
+    if (text) item.textContent = text;
+    return item;
+  }
+
+  const toggle = element('button', 'bce-toggle', 'EN／中');
+  toggle.type = 'button';
+  const overlay = element('div', 'bce-overlay');
+  const card = element('div', 'bce-card');
+  const original = element('div', 'bce-line bce-original');
+  const translation = element('div', 'bce-line bce-translation');
+  original.lang = 'en';
+  translation.lang = 'zh-Hant';
+  card.append(original, translation);
+  overlay.append(card);
+  overlay.hidden = true;
+
+  const notice = element('div', 'bce-notice');
+  const message = element('div', 'bce-message');
+  message.setAttribute('role', 'status');
+  const importButton = element('button', 'bce-import', '匯入英文 SRT／VTT');
+  importButton.type = 'button';
+  const fileInput = element('input', '');
+  fileInput.type = 'file';
+  fileInput.accept = '.srt,.vtt';
+  fileInput.hidden = true;
+  const timing = element('div', 'bce-timing');
+  const sourceLabel = element('div', 'bce-source');
+  const earlier = element('button', 'bce-import', '提早 0.5 秒');
+  const later = element('button', 'bce-import', '延後 0.5 秒');
+  earlier.type = 'button';
+  later.type = 'button';
+  timing.append(sourceLabel, earlier, later);
+  timing.hidden = true;
+  notice.append(message, importButton, fileInput, timing);
+  notice.hidden = true;
+  // Marks this version's elements; subtitles.css hides unmarked ones left by
+  // an older copy of the extension that is still loaded in Chrome.
+  for (const item of [toggle, overlay, notice]) item.dataset.bce = 'current';
+  let retired = false;
+
+  function setNotice(text) {
+    message.textContent = text;
+    notice.hidden = !text;
+    timing.hidden = true;
+  }
+
+  function showTiming() {
+    const label = advanceSeconds === 0 ? '原始時間碼'
+      : `字幕${advanceSeconds > 0 ? '提早' : '延後'} ${Math.abs(advanceSeconds).toFixed(1)} 秒`;
+    const source = job?.source ?? importedSource;
+    const timed = job?.cues.length || imported.length;
+    const wordTimed = job ? job.wordTimed : imported.some((cue) => cue.marks?.length);
+    sourceLabel.textContent = source ? `字幕來源：${source}${timed ? ` · ${label} · ${wordTimed ? '含原始字詞時間碼' : '字詞高亮為估算'}` : ''}` : '尚未選擇字幕來源';
+    earlier.hidden = later.hidden = !timed;
+    earlier.disabled = advanceSeconds >= 10;
+    later.disabled = advanceSeconds <= -10;
+    timing.hidden = false;
+  }
+
+  function shiftTiming(amount) {
+    advanceSeconds = Math.max(-10, Math.min(10, advanceSeconds + amount));
+    showTiming();
+    refresh();
+  }
+
+  function updateToggle() {
+    const label = job ? '關閉英中雙字幕' : '開啟英中雙字幕';
+    toggle.title = label;
+    toggle.setAttribute('aria-label', label);
+    toggle.setAttribute('aria-pressed', String(Boolean(job)));
+  }
+
+  function clearOverlay() {
+    overlay.classList.remove('bce-shown');
+  }
+
+  function stop(resetNotice = true) {
+    const previous = job;
+    job = undefined;
+    previous?.controller.abort();
+    previous?.inFlight?.controller.abort();
+    previous?.translator?.destroy();
+    currentText = '';
+    clearOverlay();
+    player?.classList.remove('bce-replaces-native');
+    restoreCc?.();
+    restoreCc = undefined;
+    if (resetNotice) setNotice('');
+    updateToggle();
+  }
+
+  const idFromUrl = () => location.pathname === '/watch'
+    ? new URLSearchParams(location.search).get('v')
+    : null;
+
+  // Subtitles sit near the bottom of the video, and move up to clear the
+  // progress bar and controls (with a small gap) while YouTube shows them.
+  const CONTROLS_GAP = 12;
+  let placedBottom;
+  function placeOverlay() {
+    if (!player || overlay.parentNode !== player) return;
+    const height = player.clientHeight;
+    let bottom = Math.max(10, Math.round(height * 0.03));
+    const controlsShown = !player.classList.contains('ytp-autohide')
+      && !player.classList.contains('ytp-hide-controls');
+    if (controlsShown) {
+      const playerBottom = player.getBoundingClientRect().bottom;
+      for (const selector of ['.ytp-chrome-bottom', '.ytp-progress-bar-container']) {
+        const bar = player.querySelector(selector);
+        if (bar?.getClientRects().length) {
+          bottom = Math.max(bottom, Math.round(playerBottom - bar.getBoundingClientRect().top) + CONTROLS_GAP);
+        }
+      }
+    }
+    if (bottom === placedBottom) return;
+    placedBottom = bottom;
+    overlay.style.setProperty('--bce-bottom', `${bottom}px`);
+  }
+
+  function syncPage() {
+    if (retired) return;
+    const nextId = idFromUrl();
+    const nextPlayer = nextId ? document.querySelector('#movie_player') : null;
+    if (nextId !== videoId || nextPlayer !== player) {
+      stop();
+      if (nextId !== videoId) {
+        imported = [];
+        importedSource = '';
+        advanceSeconds = 0;
+      }
+      toggle.remove();
+      overlay.remove();
+      notice.remove();
+      videoId = nextId;
+      player = nextPlayer;
+    }
+    if (!player) return;
+    const controls = player.querySelector('.ytp-right-controls');
+    if (controls && toggle.parentNode !== controls) controls.prepend(toggle);
+    if (overlay.parentNode !== player) player.append(overlay, notice);
+    placeOverlay();
+  }
+
+  function readTranscript(video) {
+    const rows = [...document.querySelectorAll(TRANSCRIPT_ROWS)].filter((row) => row.getClientRects().length);
+    const segments = rows.flatMap((row) => {
+      const stamp = row.querySelector('.segment-timestamp, [class*="timestamp"]')?.textContent.trim();
+      if (!stamp || !/^\d+(?::\d{2}){1,2}$/.test(stamp)) return [];
+      const text = row.querySelector('.segment-text, [class*="segment-text"], [class*="segmentText"], [class*="transcriptSegmentText"]')?.textContent.trim();
+      const start = stamp.split(':').reduce((time, part) => time * 60 + Number(part), 0);
+      return text ? [{ start, text }] : [];
+    }).sort((a, b) => a.start - b.start);
+    const cues = segments.filter((cue, i) => cue.start !== segments[i + 1]?.start)
+      .map((cue, i, list) => ({
+        ...cue,
+        end: Math.min(
+          list[i + 1]?.start ?? (video.duration || Infinity),
+          cue.start + 7,
+        ),
+      }));
+    return sentenceCues(cues.filter((cue) => cue.end > cue.start));
+  }
+
+  function sentenceCues(cues) {
+    const sentences = [];
+    let text = '';
+    let spans = [];
+    function flush() {
+      for (const { segment, index } of sentenceSegmenter.segment(text)) {
+        const phrase = segment.trim();
+        if (!phrase) continue;
+        const startIndex = index + segment.search(/\S/);
+        const endIndex = startIndex + phrase.length;
+        const first = spans.find((span) => span.to > startIndex);
+        const last = spans.find((span) => span.to >= endIndex);
+        const cueTime = (span, position) => {
+          const ratio = Math.max(0, Math.min(1, (position - span.from) / (span.to - span.from)));
+          return span.start + ratio * (span.end - span.start);
+        };
+        const start = cueTime(first, startIndex);
+        const end = cueTime(last, endIndex);
+        const marks = spans.flatMap((span) => (span.marks ?? [])
+          .map((mark) => ({ index: span.from + mark.index - startIndex, time: mark.time })))
+          .filter((mark) => mark.index >= 0 && mark.index < phrase.length);
+        const startMark = marks.find((mark) => mark.index === 0);
+        const endMark = last.marks?.find((mark) => last.from + mark.index === endIndex + 1);
+        const markedStart = startMark?.time ?? start;
+        const markedEnd = endMark?.time ?? end;
+        if (markedEnd > markedStart) sentences.push({ start: markedStart, end: markedEnd, text: phrase, marks });
+      }
+      text = '';
+      spans = [];
+    }
+    for (const cue of cues) {
+      const line = cue.text.replace(/\s+/g, ' ').trim();
+      if (!line) continue;
+      const previous = spans[spans.length - 1];
+      if (previous && (cue.start - previous.end > 1 || text.length >= 1000)) flush();
+      if (text) text += ' ';
+      const from = text.length;
+      text += line;
+      spans.push({ ...cue, from, to: text.length });
+    }
+    flush();
+    sentences.sort((a, b) => a.start - b.start);
+    return sentences.map((cue, index) => ({
+      ...cue,
+      end: Math.min(cue.end, sentences[index + 1]?.start ?? Infinity),
+    })).filter((cue) => cue.end > cue.start);
+
+  }
+
+  // page-hook.js (page world) holds the player's caption token and downloads
+  // the English json3 track for us.
+  window.addEventListener('message', (event) => {
+    const data = event.data;
+    if (event.source !== window || data?.source !== 'bce-timedtext') return;
+    if (data.type === 'token') {
+      for (const waiter of tokenWaiters) waiter(data.videoId);
+    } else if (data.type === 'track') {
+      pendingTracks.get(data.requestId)?.(data);
+    }
+  });
+
+  function askPage(id) {
+    return new Promise((resolve) => {
+      const requestId = `${Date.now()}-${++requestCounter}`;
+      const finish = (data) => {
+        clearTimeout(timer);
+        pendingTracks.delete(requestId);
+        resolve(data);
+      };
+      const timer = setTimeout(() => finish({ error: 'timeout' }), 15000);
+      pendingTracks.set(requestId, finish);
+      window.postMessage({ source: 'bce-content', type: 'load', videoId: id, requestId }, location.origin);
+    });
+  }
+
+  function waitForToken(id, ms) {
+    return new Promise((resolve) => {
+      const finish = (found) => {
+        clearTimeout(timer);
+        tokenWaiters.delete(waiter);
+        resolve(found);
+      };
+      const waiter = (tokenId) => {
+        if (tokenId === id) finish(true);
+      };
+      const timer = setTimeout(() => finish(false), ms);
+      tokenWaiters.add(waiter);
+    });
+  }
+
+  // CC that was already on before this script loaded won't request again by
+  // itself; switching it off and on makes the player fetch captions again.
+  async function nudgeCaptions() {
+    const cc = player?.querySelector('.ytp-subtitles-button');
+    if (cc?.getAttribute('aria-pressed') !== 'true') return;
+    cc.click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    if (cc.isConnected && cc.getAttribute('aria-pressed') === 'false') cc.click();
+  }
+
+  async function requestTimedText(id, ccWasOn) {
+    if (timedCache?.videoId === id) return timedCache;
+    let reply = await askPage(id);
+    if (reply.error === 'no-token') {
+      // The player only requests captions once the video is playing.
+      const token = waitForToken(id, 20000);
+      if (ccWasOn) void nudgeCaptions();
+      if (await token) reply = await askPage(id);
+    }
+    if (!reply.events) return undefined;
+    const asr = reply.track.kind === 'asr';
+    const cues = globalThis.bceCaptions.fromJson3(reply.events, { asr });
+    if (!cues.length) return undefined;
+    timedCache = {
+      videoId: id,
+      cues,
+      wordTimed: asr,
+      source: asr ? 'YouTube 英文自動字幕' : 'YouTube 英文字幕',
+    };
+    return timedCache;
+  }
+
+  async function loadTimedText(active) {
+    const id = videoId;
+    const timed = await requestTimedText(id, active.ccWasOn);
+    if (job !== active || idFromUrl() !== id) return;
+    if (!timed) {
+      if (!active.cues.length && openTranscript()) active.transcriptUntil = performance.now() + 2600;
+      return;
+    }
+    active.cues = timed.cues;
+    active.source = timed.source;
+    active.wordTimed = timed.wordTimed;
+    active.fillGaps = false;
+    active.transcriptUntil = 0;
+    active.inFlight?.controller.abort();
+    currentText = '';
+    clearOverlay();
+    if (!timing.hidden) showTiming();
+    refresh();
+  }
+
+  function openTranscript() {
+    const button = [...document.querySelectorAll(
+      'ytd-video-description-transcript-section-renderer button, #description button, ytd-watch-metadata button'
+    )].find((item) => {
+      const label = item.getAttribute('aria-label') || item.textContent.trim();
+      return /^(show transcript|顯示逐字稿|顯示轉錄稿)$/i.test(label) && item.getClientRects().length;
+    });
+    button?.click();
+    return Boolean(button);
+  }
+
+  function readNativeCaption() {
+    const container = player?.querySelector(NATIVE_CAPTIONS);
+    if (!container || !container.getClientRects().length) return '';
+    const lines = [...container.querySelectorAll(CAPTION_LINES)]
+      .map((line) => line.textContent.trim()).filter(Boolean);
+    if (lines.length) return lines.join('\n');
+    return [...container.querySelectorAll('.ytp-caption-segment')]
+      .map((part) => part.textContent.trim()).filter(Boolean).join(' ');
+  }
+
+  function cueIndexAt(cues, time) {
+    let lo = 0;
+    let hi = cues.length;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (cues[mid].start <= time) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo - 1;
+  }
+
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  const EASE = 'cubic-bezier(.2, .8, .2, 1)';
+
+  // Runs a content change, then eases the card from its old size to the new
+  // one instead of letting it snap.
+  function resizeSmoothly(change) {
+    const before = overlay.classList.contains('bce-shown') ? card.getBoundingClientRect() : undefined;
+    change();
+    if (!before || reduceMotion.matches) return;
+    const after = card.getBoundingClientRect();
+    if (Math.abs(before.width - after.width) < 1 && Math.abs(before.height - after.height) < 1) return;
+    card.animate([
+      { width: `${before.width}px`, height: `${before.height}px` },
+      { width: `${after.width}px`, height: `${after.height}px` },
+    ], { duration: 240, easing: EASE });
+  }
+
+  function reveal(line) {
+    if (reduceMotion.matches || !line.textContent) return;
+    line.animate([
+      { opacity: 0, transform: 'translateY(0.3em)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 260, easing: EASE });
+  }
+
+  function showTranslation(result) {
+    if (translation.textContent === result) return;
+    resizeSmoothly(() => {
+      translation.textContent = result;
+    });
+    reveal(translation);
+  }
+
+  function renderCaption(text, result = '', cue) {
+    if (!text) {
+      // Fade out and keep the last sentence on the card while it fades.
+      displayedCue = undefined;
+      wordElements = [];
+      clearOverlay();
+      return;
+    }
+    const changed = text !== original.textContent || cue !== displayedCue;
+    resizeSmoothly(() => fillCaption(text, result, cue));
+    if (changed) {
+      reveal(original);
+      reveal(translation);
+    }
+    overlay.hidden = false;
+    overlay.classList.add('bce-shown');
+  }
+
+  function fillCaption(text, result, cue) {
+    displayedCue = cue;
+    wordElements = [];
+    original.textContent = text;
+    if (cue && text) {
+      original.textContent = '';
+      const tokens = [...text.matchAll(/\S+|\s+/g)];
+      const words = tokens.filter(([token]) => /\S/.test(token));
+      for (const token of tokens) {
+        const span = element('span', '', token[0]);
+        original.append(span);
+        if (!/\S/.test(token[0])) continue;
+        span.dataset.word = '';
+        const mark = cue.marks?.find((entry) => entry.index === token.index);
+        wordElements.push({ span, time: mark?.time, fill: 0 });
+      }
+      let anchor = 0;
+      wordElements[0].time ??= cue.start;
+      for (let i = 1; i <= words.length; i++) {
+        const next = i === words.length ? cue.end : wordElements[i].time;
+        if (next === undefined) continue;
+        const start = wordElements[anchor].time;
+        for (let j = anchor + 1; j < i; j++) {
+          wordElements[j].time = start + (next - start) * (j - anchor) / (i - anchor);
+        }
+        anchor = i;
+      }
+      // A word is "sung" from its start until the next word starts, but not
+      // through a long pause; the last word gets a length estimated from its
+      // letters, since the cue end includes the time it lingers on screen.
+      wordElements.forEach((word, i) => {
+        const next = wordElements[i + 1]?.time;
+        const spoken = Math.min(0.9, Math.max(0.25, 0.12 + 0.065 * word.span.textContent.length));
+        word.end = next === undefined
+          ? Math.min(cue.end, word.time + spoken)
+          : Math.min(next, word.time + 1);
+      });
+    }
+    translation.textContent = result;
+  }
+
+  // KTV-style colour sweep: each word fills left to right while it is spoken.
+  function updateFill(time) {
+    for (const word of wordElements) {
+      const length = word.end - word.time;
+      const progress = length > 0 ? (time - word.time) / length : Number(time >= word.time);
+      const fill = Math.round(Math.min(1, Math.max(0, progress)) * 1000) / 10;
+      if (fill === word.fill) continue;
+      word.fill = fill;
+      word.span.style.setProperty('--bce-fill', `${fill}%`);
+    }
+  }
+
+  // The 75 ms poll is too coarse for a smooth sweep, so the fill follows the
+  // video on every animation frame.
+  function animateFill() {
+    if (retired) return;
+    requestAnimationFrame(animateFill);
+    const video = player?.querySelector('video');
+    if (!job || !displayedCue || !wordElements.length || !video) return;
+    updateFill(video.currentTime + advanceSeconds);
+  }
+  requestAnimationFrame(animateFill);
+
+  function setTimedCaption(active, text, cue) {
+    if (text === currentText && cue === displayedCue) return;
+    currentText = text;
+    const result = cache.get(text);
+    if (text && result === undefined && active.inFlight?.text !== text) {
+      active.inFlight?.controller.abort();
+    }
+    renderCaption(text, result, cue);
+    if (text && active.translator && !active.receivedCaption) {
+      active.receivedCaption = true;
+      if (timing.hidden) setNotice('');
+    }
+  }
+
+  function refreshLive(active, now) {
+    const live = active.live;
+    const raw = readNativeCaption().replace(/\s+/g, ' ').trim();
+    if (raw) live.lastSeen = now;
+    if (raw && raw !== live.raw && !live.raw.startsWith(raw + ' ')) {
+      const previous = live.raw;
+      const suffix = previous && raw.startsWith(previous) ? raw.slice(previous.length) : '';
+      if (!live.buffer) live.started = now;
+      if (live.buffer && /^[,.!?;:](?:$|\s|["'”’])/.test(suffix)) {
+        live.buffer += suffix;
+      } else {
+        const left = previous.split(' ');
+        const right = raw.split(' ');
+        let overlap = previous ? Math.min(left.length, right.length) : 0;
+        while (overlap && left.slice(-overlap).join(' ') !== right.slice(0, overlap).join(' ')) overlap--;
+        const addition = right.slice(overlap).join(' ');
+        if (addition && !live.buffer && live.wanted) {
+          live.wanted = '';
+          live.shown = '';
+          active.inFlight?.controller.abort();
+          clearOverlay();
+        }
+        live.buffer = [live.buffer, addition].filter(Boolean).join(' ');
+      }
+      live.raw = raw;
+      live.changed = now;
+    }
+
+    const gap = !raw && now - live.lastSeen >= LIVE_GAP_MS;
+    if (live.buffer && (gap || now - live.started >= 6000
+      || (SENTENCE_END.test(live.buffer) && now - live.changed >= 200))) {
+      const sentence = live.buffer;
+      live.buffer = '';
+      live.wanted = sentence;
+      if (active.inFlight?.text !== sentence) active.inFlight?.controller.abort();
+    }
+    if (gap) live.raw = '';
+    if (gap && now - live.lastSeen >= 2700 && now - (live.shownAt ?? -Infinity) >= 1400) {
+      clearOverlay();
+      live.wanted = '';
+      live.shown = '';
+    }
+    const sentence = live.wanted;
+    if (!sentence) return;
+    if (sentence !== live.shown) {
+      renderCaption(sentence, cache.get(sentence));
+      live.shown = sentence;
+      live.shownAt = now;
+    }
+    if (!active.translator) return;
+    if (!active.receivedCaption) {
+      active.receivedCaption = true;
+      if (timing.hidden) setNotice('');
+    }
+    if (!cache.has(sentence) && !active.inFlight) {
+      void translateCaption(active, sentence);
+    }
+  }
+
+  function refresh() {
+    const active = job;
+    const video = player?.querySelector('video');
+    if (!active || !video || idFromUrl() !== videoId || video.seeking) return;
+    const now = performance.now();
+    if (active.transcriptUntil && now >= active.nextTranscriptCheck) {
+      active.nextTranscriptCheck = now + 200;
+      const cues = readTranscript(video);
+      if (cues.length) {
+        active.cues = cues;
+        active.source = 'YouTube 逐字稿';
+        if (!timing.hidden) showTiming();
+        active.transcriptUntil = 0;
+        active.inFlight?.controller.abort();
+        currentText = '';
+        clearOverlay();
+      } else if (now >= active.transcriptUntil) {
+        active.transcriptUntil = 0;
+      }
+    }
+    const cues = active.cues;
+    if (!cues.length) {
+      refreshLive(active, now);
+      return;
+    }
+
+    const time = video.currentTime + advanceSeconds;
+    const index = cueIndexAt(cues, time);
+    const cue = cues[index];
+    const currentCue = cue && time < cue.end ? cue : undefined;
+    const fallback = !currentCue && active.fillGaps
+      ? readNativeCaption().replace(/\s+/g, ' ').trim() : '';
+    setTimedCaption(active, currentCue?.text ?? fallback, currentCue);
+    if (currentCue) updateFill(time);
+
+    if (currentText && active.translator && !active.receivedCaption) {
+      active.receivedCaption = true;
+      if (timing.hidden) setNotice('');
+    }
+    if (!active.translator || active.inFlight) return;
+    if (currentText && !cache.has(currentText)) {
+      void translateCaption(active, currentText);
+      return;
+    }
+    const upcoming = cues.slice(index + 1, index + 16)
+      .find((cue) => cue.start - time <= 60 && !cache.has(cue.text));
+    if (upcoming) void translateCaption(active, upcoming.text);
+  }
+
+  function resetPosition(event) {
+    if (!job || event.target !== player?.querySelector('video')) return;
+    job.inFlight?.controller.abort();
+    job.live = { raw: '', buffer: '', lastSeen: -Infinity };
+    currentText = '';
+    clearOverlay();
+  }
+
+  async function translateCaption(active, text) {
+    const controller = new AbortController();
+    active.inFlight = { text, controller };
+    try {
+      const result = await active.translator.translate(text, { signal: controller.signal });
+      if (job !== active || controller.signal.aborted || idFromUrl() !== videoId) return;
+      if (cache.size >= 4000) cache.delete(cache.keys().next().value);
+      cache.set(text, result);
+      if (text === currentText || (!active.cues.length && text === active.live.shown)) {
+        showTranslation(result);
+      }
+    } catch {
+      if (job === active && !controller.signal.aborted && idFromUrl() === videoId) {
+        stop(false);
+        setNotice('翻譯中斷，請再按一次 EN／中。');
+      }
+    } finally {
+      active.inFlight = undefined;
+      if (job === active) refresh();
+    }
+  }
+
+  function enableNativeCaptions() {
+    const cc = player.querySelector('.ytp-subtitles-button');
+    if (!cc || cc.disabled || cc.getAttribute('aria-disabled') === 'true'
+      || cc.getAttribute('aria-pressed') === null || cc.getClientRects().length === 0) return false;
+    if (cc.getAttribute('aria-pressed') === 'false') {
+      cc.click();
+      const id = videoId;
+      restoreCc = () => {
+        if (idFromUrl() === id && cc.isConnected && cc.getAttribute('aria-pressed') === 'true') cc.click();
+      };
+    }
+    return true;
+  }
+
+  async function begin() {
+    if (retired) return;
+    syncPage();
+    if (!player) return;
+    if (job) {
+      stop();
+      return;
+    }
+
+    const video = player.querySelector('video');
+    if (!video) return;
+    const timed = !imported.length && timedCache?.videoId === videoId ? timedCache : undefined;
+    const cues = imported.length ? imported : timed?.cues ?? readTranscript(video);
+    const nativeAvailable = !imported.length && enableNativeCaptions();
+    // Turning CC on makes the player request captions, which hands
+    // page-hook.js the token it needs to download the English track.
+    const fetchingTimed = !imported.length && !timed && nativeAvailable;
+    const openingTranscript = !cues.length && !fetchingTimed && openTranscript();
+    if (!cues.length && !nativeAvailable && !openingTranscript) {
+      setNotice('播放器目前沒有可用的 CC。可匯入從 DownSub 下載的英文 SRT。');
+      return;
+    }
+    if (!globalThis.Translator) {
+      stop(false);
+      setNotice('這個 Chrome 環境無法使用內建翻譯。');
+      return;
+    }
+
+    const active = {
+      controller: new AbortController(),
+      receivedCaption: false,
+      cues,
+      source: imported.length ? importedSource : timed ? timed.source : cues.length ? 'YouTube 逐字稿' : '即時 CC',
+      wordTimed: imported.length ? imported.some((cue) => cue.marks?.length) : Boolean(timed?.wordTimed),
+      fillGaps: nativeAvailable && !timed,
+      ccWasOn: nativeAvailable && !restoreCc,
+      live: { raw: '', buffer: '', lastSeen: -Infinity },
+      transcriptUntil: openingTranscript ? performance.now() + 2600 : 0,
+      nextTranscriptCheck: 0,
+    };
+    job = active;
+    updateToggle();
+    setNotice('正在準備 Chrome 內建翻譯…');
+    player.classList.add('bce-replaces-native');
+    if (fetchingTimed) void loadTimedText(active);
+    refresh();
+
+    try {
+      active.translator = await Translator.create({
+        ...LANGUAGES,
+        signal: active.controller.signal,
+        monitor(download) {
+          download.addEventListener('downloadprogress', (event) => {
+            if (job === active) setNotice(`下載語言模型 ${Math.round(event.loaded * 100)}%`);
+          });
+        }
+      });
+      if (job !== active) {
+        active.translator.destroy();
+        return;
+      }
+      setNotice(active.cues.length
+        ? '已取得時間碼，字幕會跟著影片時間切換。'
+        : '播放影片測試。若原文不是英文，請在 YouTube 字幕設定選英文。');
+      refresh();
+    } catch {
+      if (job === active) {
+        stop(false);
+        setNotice('暫時無法啟動英翻繁中。請確認桌面版 Chrome 支援內建翻譯，再點一次。');
+      }
+    }
+  }
+
+  toggle.addEventListener('click', begin);
+  toggle.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    if (!timing.hidden) {
+      setNotice('');
+      return;
+    }
+    setNotice(job?.source === '即時 CC' ? '即時 CC 會等字幕送到才能合句。可匯入 SRT 使用時間碼。' : '字幕設定');
+    showTiming();
+  });
+  earlier.addEventListener('click', () => shiftTiming(0.5));
+  later.addEventListener('click', () => shiftTiming(-0.5));
+  importButton.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files[0];
+    fileInput.value = '';
+    if (!file) return;
+    const id = videoId;
+    try {
+      const contents = await file.text();
+      const entries = globalThis.bceSubtitleParser.parseSubtitleFile(contents);
+      const source = /^\uFEFF?WEBVTT/.test(contents) ? 'VTT' : 'SRT';
+      if (idFromUrl() !== id) return;
+      if (!entries.length) {
+        setNotice('讀不到字幕時間碼，請選擇英文 .srt 或 .vtt 檔案。');
+        return;
+      }
+      stop();
+      imported = sentenceCues(entries);
+      importedSource = source;
+      advanceSeconds = 0;
+      setNotice(`已讀取 ${entries.length} 段字幕。請按 EN／中開始翻譯。`);
+    } catch {
+      if (idFromUrl() === id) setNotice('無法讀取這個字幕檔。');
+    }
+  });
+
+  document.addEventListener('yt-navigate-finish', syncPage);
+  document.addEventListener('loadedmetadata', syncPage, true);
+  document.addEventListener('seeking', resetPosition, true);
+  // A short poll catches caption mutations and controls replaced by YouTube.
+  const timer = setInterval(() => {
+    syncPage();
+    refresh();
+  }, 75);
+
+  // Only one copy may run: a copy that loads later (another install of this
+  // extension, or a reload) tells the earlier one to remove itself.
+  document.dispatchEvent(new Event('bce-takeover'));
+  document.addEventListener('bce-takeover', () => {
+    retired = true;
+    clearInterval(timer);
+    stop();
+    toggle.remove();
+    overlay.remove();
+    notice.remove();
+  }, { once: true });
+
+  updateToggle();
+  syncPage();
+})();
