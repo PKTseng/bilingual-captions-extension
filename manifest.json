@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "雙語字幕",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "使用 Chrome 內建翻譯，在 YouTube 顯示英文和繁體中文雙字幕。",
   "content_scripts": [
     {
@@ -21,6 +21,8 @@
       "js": [
         "captions.js",
         "subtitle-parser.js",
+        "transcript.js",
+        "page-bridge.js",
         "content.js"
       ],
       "css": [

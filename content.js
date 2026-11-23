@@ -6,9 +6,11 @@
   const CAPTION_LINES = '.caption-visual-line';
   const cache = new Map();
   const SENTENCE_END = /[.!?]["'”’)\]]*$/;
-  const sentenceSegmenter = new Intl.Segmenter('en', { granularity: 'sentence' });
+  const englishWords = new Intl.Segmenter('en', { granularity: 'word' });
+  const chineseWords = new Intl.Segmenter('zh-Hant', { granularity: 'word' });
   const LIVE_GAP_MS = 900;
-  const TRANSCRIPT_ROWS = 'ytd-transcript-segment-renderer, transcript-segment-view-model, yt-transcript-segment-view-model';
+  const { sentenceCues, readTranscript, openTranscript } = globalThis.bceTranscript;
+  const { requestTimedText, cachedTimedText } = globalThis.bcePageBridge;
   let videoId;
   let player;
   let job;
@@ -19,10 +21,6 @@
   let importedSource = '';
   let displayedCue;
   let wordElements = [];
-  let timedCache;
-  let requestCounter = 0;
-  const pendingTracks = new Map();
-  const tokenWaiters = new Set();
 
   function element(tag, className, text) {
     const item = document.createElement(tag);
@@ -40,7 +38,9 @@
   original.lang = 'en';
   translation.lang = 'zh-Hant';
   card.append(original, translation);
-  overlay.append(card);
+  const copied = element('div', 'bce-copied');
+  copied.setAttribute('role', 'status');
+  overlay.append(copied, card);
   overlay.hidden = true;
 
   const notice = element('div', 'bce-notice');
@@ -100,12 +100,104 @@
   }
 
   function clearOverlay() {
+    if (job && held) return;
     overlay.classList.remove('bce-shown');
+  }
+
+  // While the pointer is on the card (or a selection drag that began there is
+  // still going), the sentence stays put so a word or phrase can be picked out
+  // of it; the video keeps playing and the caption catches up afterwards.
+  let held = false;
+  let hovering = false;
+  let pressing = false;
+
+  function selectionInCard() {
+    const selection = getSelection();
+    return selection.rangeCount && !selection.isCollapsed
+      && card.contains(selection.getRangeAt(0).commonAncestorContainer)
+      ? selection.toString().replace(/\s+/g, ' ').trim() : '';
+  }
+
+  function updateHeld() {
+    const next = Boolean(job) && (hovering || pressing);
+    if (next === held) return;
+    held = next;
+    if (held) return;
+    if (selectionInCard()) getSelection().removeAllRanges();
+    if (!job) return;
+    clearOverlay();
+    currentText = '';
+    job.live.shown = '';
+    refresh();
+    placeOverlay();
+  }
+
+  let copiedTimer;
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const put = (event) => {
+        event.clipboardData.setData('text/plain', text);
+        event.preventDefault();
+      };
+      document.addEventListener('copy', put, { once: true });
+      const done = document.execCommand('copy');
+      document.removeEventListener('copy', put);
+      if (!done) return;
+    }
+    copied.textContent = `已複製：${text}`;
+    copied.classList.add('bce-visible');
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => copied.classList.remove('bce-visible'), 1400);
+  }
+
+  // A selection drag copies what was selected (double/triple click selects a
+  // word/the line natively); a plain click copies the word under the pointer.
+  function copyFromPointer(event) {
+    if (event.button !== 0) return;
+    const selected = selectionInCard();
+    const word = event.target instanceof Element && card.contains(event.target)
+      ? event.target.closest('.bce-word') : null;
+    const text = selected || word?.textContent;
+    if (text) void copyText(text);
+    if (!selected && word) {
+      word.classList.remove('bce-flash');
+      void word.offsetWidth;
+      word.classList.add('bce-flash');
+    }
+  }
+
+  card.addEventListener('pointerenter', () => {
+    hovering = true;
+    updateHeld();
+  });
+  card.addEventListener('pointerleave', () => {
+    hovering = false;
+    updateHeld();
+  });
+  card.addEventListener('mousedown', (event) => {
+    if (event.button === 0) pressing = true;
+    updateHeld();
+  });
+  document.addEventListener('mouseup', (event) => {
+    if (!pressing) return;
+    pressing = false;
+    copyFromPointer(event);
+    updateHeld();
+  }, true);
+  // Keep the player from treating clicks on the card as play/pause or
+  // fullscreen, and from popping its controls up under the pointer; right
+  // click gets the browser's own menu (with Copy) instead of YouTube's.
+  for (const type of ['pointerdown', 'pointerup', 'pointermove', 'mousedown', 'mouseup',
+    'mousemove', 'mouseover', 'mouseout', 'click', 'dblclick', 'contextmenu']) {
+    card.addEventListener(type, (event) => event.stopPropagation());
   }
 
   function stop(resetNotice = true) {
     const previous = job;
     job = undefined;
+    hovering = pressing = held = false;
     previous?.controller.abort();
     previous?.inFlight?.controller.abort();
     previous?.translator?.destroy();
@@ -127,7 +219,7 @@
   const CONTROLS_GAP = 12;
   let placedBottom;
   function placeOverlay() {
-    if (!player || overlay.parentNode !== player) return;
+    if (!player || overlay.parentNode !== player || held) return;
     const height = player.clientHeight;
     let bottom = Math.max(10, Math.round(height * 0.03));
     const controlsShown = !player.classList.contains('ytp-autohide')
@@ -170,116 +262,6 @@
     placeOverlay();
   }
 
-  function readTranscript(video) {
-    const rows = [...document.querySelectorAll(TRANSCRIPT_ROWS)].filter((row) => row.getClientRects().length);
-    const segments = rows.flatMap((row) => {
-      const stamp = row.querySelector('.segment-timestamp, [class*="timestamp"]')?.textContent.trim();
-      if (!stamp || !/^\d+(?::\d{2}){1,2}$/.test(stamp)) return [];
-      const text = row.querySelector('.segment-text, [class*="segment-text"], [class*="segmentText"], [class*="transcriptSegmentText"]')?.textContent.trim();
-      const start = stamp.split(':').reduce((time, part) => time * 60 + Number(part), 0);
-      return text ? [{ start, text }] : [];
-    }).sort((a, b) => a.start - b.start);
-    const cues = segments.filter((cue, i) => cue.start !== segments[i + 1]?.start)
-      .map((cue, i, list) => ({
-        ...cue,
-        end: Math.min(
-          list[i + 1]?.start ?? (video.duration || Infinity),
-          cue.start + 7,
-        ),
-      }));
-    return sentenceCues(cues.filter((cue) => cue.end > cue.start));
-  }
-
-  function sentenceCues(cues) {
-    const sentences = [];
-    let text = '';
-    let spans = [];
-    function flush() {
-      for (const { segment, index } of sentenceSegmenter.segment(text)) {
-        const phrase = segment.trim();
-        if (!phrase) continue;
-        const startIndex = index + segment.search(/\S/);
-        const endIndex = startIndex + phrase.length;
-        const first = spans.find((span) => span.to > startIndex);
-        const last = spans.find((span) => span.to >= endIndex);
-        const cueTime = (span, position) => {
-          const ratio = Math.max(0, Math.min(1, (position - span.from) / (span.to - span.from)));
-          return span.start + ratio * (span.end - span.start);
-        };
-        const start = cueTime(first, startIndex);
-        const end = cueTime(last, endIndex);
-        const marks = spans.flatMap((span) => (span.marks ?? [])
-          .map((mark) => ({ index: span.from + mark.index - startIndex, time: mark.time })))
-          .filter((mark) => mark.index >= 0 && mark.index < phrase.length);
-        const startMark = marks.find((mark) => mark.index === 0);
-        const endMark = last.marks?.find((mark) => last.from + mark.index === endIndex + 1);
-        const markedStart = startMark?.time ?? start;
-        const markedEnd = endMark?.time ?? end;
-        if (markedEnd > markedStart) sentences.push({ start: markedStart, end: markedEnd, text: phrase, marks });
-      }
-      text = '';
-      spans = [];
-    }
-    for (const cue of cues) {
-      const line = cue.text.replace(/\s+/g, ' ').trim();
-      if (!line) continue;
-      const previous = spans[spans.length - 1];
-      if (previous && (cue.start - previous.end > 1 || text.length >= 1000)) flush();
-      if (text) text += ' ';
-      const from = text.length;
-      text += line;
-      spans.push({ ...cue, from, to: text.length });
-    }
-    flush();
-    sentences.sort((a, b) => a.start - b.start);
-    return sentences.map((cue, index) => ({
-      ...cue,
-      end: Math.min(cue.end, sentences[index + 1]?.start ?? Infinity),
-    })).filter((cue) => cue.end > cue.start);
-
-  }
-
-  // page-hook.js (page world) holds the player's caption token and downloads
-  // the English json3 track for us.
-  window.addEventListener('message', (event) => {
-    const data = event.data;
-    if (event.source !== window || data?.source !== 'bce-timedtext') return;
-    if (data.type === 'token') {
-      for (const waiter of tokenWaiters) waiter(data.videoId);
-    } else if (data.type === 'track') {
-      pendingTracks.get(data.requestId)?.(data);
-    }
-  });
-
-  function askPage(id) {
-    return new Promise((resolve) => {
-      const requestId = `${Date.now()}-${++requestCounter}`;
-      const finish = (data) => {
-        clearTimeout(timer);
-        pendingTracks.delete(requestId);
-        resolve(data);
-      };
-      const timer = setTimeout(() => finish({ error: 'timeout' }), 15000);
-      pendingTracks.set(requestId, finish);
-      window.postMessage({ source: 'bce-content', type: 'load', videoId: id, requestId }, location.origin);
-    });
-  }
-
-  function waitForToken(id, ms) {
-    return new Promise((resolve) => {
-      const finish = (found) => {
-        clearTimeout(timer);
-        tokenWaiters.delete(waiter);
-        resolve(found);
-      };
-      const waiter = (tokenId) => {
-        if (tokenId === id) finish(true);
-      };
-      const timer = setTimeout(() => finish(false), ms);
-      tokenWaiters.add(waiter);
-    });
-  }
-
   // CC that was already on before this script loaded won't request again by
   // itself; switching it off and on makes the player fetch captions again.
   async function nudgeCaptions() {
@@ -290,31 +272,9 @@
     if (cc.isConnected && cc.getAttribute('aria-pressed') === 'false') cc.click();
   }
 
-  async function requestTimedText(id, ccWasOn) {
-    if (timedCache?.videoId === id) return timedCache;
-    let reply = await askPage(id);
-    if (reply.error === 'no-token') {
-      // The player only requests captions once the video is playing.
-      const token = waitForToken(id, 20000);
-      if (ccWasOn) void nudgeCaptions();
-      if (await token) reply = await askPage(id);
-    }
-    if (!reply.events) return undefined;
-    const asr = reply.track.kind === 'asr';
-    const cues = globalThis.bceCaptions.fromJson3(reply.events, { asr });
-    if (!cues.length) return undefined;
-    timedCache = {
-      videoId: id,
-      cues,
-      wordTimed: asr,
-      source: asr ? 'YouTube 英文自動字幕' : 'YouTube 英文字幕',
-    };
-    return timedCache;
-  }
-
   async function loadTimedText(active) {
     const id = videoId;
-    const timed = await requestTimedText(id, active.ccWasOn);
+    const timed = await requestTimedText(id, active.ccWasOn ? nudgeCaptions : undefined);
     if (job !== active || idFromUrl() !== id) return;
     if (!timed) {
       if (!active.cues.length && openTranscript()) active.transcriptUntil = performance.now() + 2600;
@@ -330,17 +290,6 @@
     clearOverlay();
     if (!timing.hidden) showTiming();
     refresh();
-  }
-
-  function openTranscript() {
-    const button = [...document.querySelectorAll(
-      'ytd-video-description-transcript-section-renderer button, #description button, ytd-watch-metadata button'
-    )].find((item) => {
-      const label = item.getAttribute('aria-label') || item.textContent.trim();
-      return /^(show transcript|顯示逐字稿|顯示轉錄稿)$/i.test(label) && item.getClientRects().length;
-    });
-    button?.click();
-    return Boolean(button);
   }
 
   function readNativeCaption() {
@@ -389,15 +338,26 @@
     ], { duration: 260, easing: EASE });
   }
 
+  // Each word-like piece gets its own span, so it can be hovered and clicked.
+  function appendWords(parent, text, segmenter) {
+    for (const { segment, isWordLike } of segmenter.segment(text)) {
+      parent.append(isWordLike ? element('span', 'bce-word', segment) : segment);
+    }
+  }
+
+  function setTranslation(result) {
+    translation.textContent = '';
+    appendWords(translation, result, chineseWords);
+  }
+
   function showTranslation(result) {
-    if (translation.textContent === result) return;
-    resizeSmoothly(() => {
-      translation.textContent = result;
-    });
+    if (held || translation.textContent === result) return;
+    resizeSmoothly(() => setTranslation(result));
     reveal(translation);
   }
 
   function renderCaption(text, result = '', cue) {
+    if (held) return;
     if (!text) {
       // Fade out and keep the last sentence on the card while it fades.
       displayedCue = undefined;
@@ -418,23 +378,25 @@
   function fillCaption(text, result, cue) {
     displayedCue = cue;
     wordElements = [];
-    original.textContent = text;
-    if (cue && text) {
-      original.textContent = '';
-      const tokens = [...text.matchAll(/\S+|\s+/g)];
-      const words = tokens.filter(([token]) => /\S/.test(token));
-      for (const token of tokens) {
-        const span = element('span', '', token[0]);
-        original.append(span);
-        if (!/\S/.test(token[0])) continue;
-        span.dataset.word = '';
-        const mark = cue.marks?.find((entry) => entry.index === token.index);
-        wordElements.push({ span, time: mark?.time, fill: 0 });
+    original.textContent = '';
+    for (const token of text.matchAll(/\S+|\s+/g)) {
+      if (!/\S/.test(token[0])) {
+        original.append(token[0]);
+        continue;
       }
+      const span = element('span', 'bce-token');
+      appendWords(span, token[0], englishWords);
+      original.append(span);
+      if (!cue) continue;
+      span.dataset.word = '';
+      const mark = cue.marks?.find((entry) => entry.index === token.index);
+      wordElements.push({ span, time: mark?.time, fill: 0 });
+    }
+    if (wordElements.length) {
       let anchor = 0;
       wordElements[0].time ??= cue.start;
-      for (let i = 1; i <= words.length; i++) {
-        const next = i === words.length ? cue.end : wordElements[i].time;
+      for (let i = 1; i <= wordElements.length; i++) {
+        const next = i === wordElements.length ? cue.end : wordElements[i].time;
         if (next === undefined) continue;
         const start = wordElements[anchor].time;
         for (let j = anchor + 1; j < i; j++) {
@@ -453,7 +415,7 @@
           : Math.min(next, word.time + 1);
       });
     }
-    translation.textContent = result;
+    setTranslation(result);
   }
 
   // KTV-style colour sweep: each word fills left to right while it is spoken.
@@ -656,7 +618,7 @@
 
     const video = player.querySelector('video');
     if (!video) return;
-    const timed = !imported.length && timedCache?.videoId === videoId ? timedCache : undefined;
+    const timed = !imported.length ? cachedTimedText(videoId) : undefined;
     const cues = imported.length ? imported : timed?.cues ?? readTranscript(video);
     const nativeAvailable = !imported.length && enableNativeCaptions();
     // Turning CC on makes the player request captions, which hands
