@@ -12,7 +12,8 @@
   const { sentenceCues, readTranscript, openTranscript } = globalThis.bceTranscript;
   const { requestTimedText, cachedTimedText } = globalThis.bcePageBridge;
   const { TIERS, TIER_LABELS, SETTINGS_KEY, mergeSettings } = globalThis.bceSettings;
-  const { createAiTranslator } = globalThis.bceAiTranslator;
+  const { createAiTranslator, CONTEXT_SIZE } = globalThis.bceAiTranslator;
+  const PASSING_NOTICE_MS = 6000;
   let tier = 'basic';
   let videoId;
   let player;
@@ -97,10 +98,21 @@
   for (const item of [toggle, overlay, notice]) item.dataset.bce = 'current';
   let retired = false;
 
+  let noticeTimer;
   function setNotice(text) {
+    clearTimeout(noticeTimer);
     message.textContent = text;
     notice.hidden = !text;
     timing.hidden = true;
+  }
+
+  // A notice that goes away by itself, unless something replaced it or the
+  // settings panel is open.
+  function setPassingNotice(text) {
+    setNotice(text);
+    noticeTimer = setTimeout(() => {
+      if (message.textContent === text && timing.hidden) setNotice('');
+    }, PASSING_NOTICE_MS);
   }
 
   function showTiming() {
@@ -110,9 +122,9 @@
     const timed = job?.cues.length || imported.length;
     const wordTimed = job ? job.wordTimed : imported.some((cue) => cue.marks?.length);
     const sourceText = source ? `字幕來源：${source}${timed ? ` · ${label} · ${wordTimed ? '含原始字詞時間碼' : '字詞高亮為估算'}` : ''}` : '尚未選擇字幕來源';
-    // A job running the built-in translator on an AI tier has fallen back.
-    const inUse = job?.translator && job.translator.kind !== 'ai' ? 'basic' : tier;
-    sourceLabel.textContent = `${sourceText} · 翻譯：${TIER_LABELS[inUse]}`;
+    const inUse = !job?.fellBack || tier === 'basic' ? TIER_LABELS[tier]
+      : `${job.fellBack === 'english' ? '僅英文' : TIER_LABELS.basic}（AI 已暫停，點「${TIER_LABELS[tier]}」重試）`;
+    sourceLabel.textContent = `${sourceText} · 翻譯：${inUse}`;
     for (const button of tierButtons) button.setAttribute('aria-pressed', String(button.dataset.tier === tier));
     earlier.hidden = later.hidden = !timed;
     earlier.disabled = advanceSeconds >= 10;
@@ -231,6 +243,7 @@
   function stop(resetNotice = true) {
     const previous = job;
     job = undefined;
+    clearTimeout(noticeTimer);
     hovering = pressing = held = false;
     previous?.controller.abort();
     previous?.inFlight?.controller.abort();
@@ -620,7 +633,7 @@
     } catch (error) {
       if (job !== active || controller.signal.aborted || error?.name === 'AbortError'
         || idFromUrl() !== videoId || translator !== active.translator) return;
-      if (translator.kind === 'ai' && globalThis.Translator) {
+      if (translator.kind === 'ai') {
         void fallBack(active, error);
         return;
       }
@@ -637,7 +650,13 @@
     if (wanted !== 'basic') {
       return createAiTranslator({
         tier: wanted,
-        getSentences: () => active.cues.map((cue) => cue.text),
+        // From a little before the current cue, so a line that repeats
+        // ("[Music]") is found where the video is, not at its first use.
+        getSentences: () => {
+          const video = player?.querySelector('video');
+          const index = video ? cueIndexAt(active.cues, video.currentTime + advanceSeconds) : 0;
+          return active.cues.slice(Math.max(0, index - CONTEXT_SIZE)).map((cue) => cue.text);
+        },
         // An orphaned copy (after an extension reload) throws synchronously
         // here; async turns that into a rejection, so it falls back.
         send: async (payload) => chrome.runtime.sendMessage(payload),
@@ -679,25 +698,36 @@
     }
   }
 
+  // The AI translator failed: carry on with the built-in one, or with English
+  // only when that cannot start (no API, or a model that needs a download,
+  // which requires a click). Picking the AI tier again retries.
   async function fallBack(active, error) {
+    console.warn('[bce] AI 翻譯失敗：', error?.code ?? error);
     cache.clear();
+    active.fellBack = 'basic';
     const text = error?.code === 'no-key'
       ? '請先在設定頁填入 OpenRouter／Gemini 的 API key，已改用內建翻譯。'
-      : 'AI 暫時無法使用，已改用內建翻譯。';
+      : error?.code === 'bad-key'
+        ? 'API key 無效或沒有權限，已改用內建翻譯。請到設定頁檢查。'
+        : 'AI 暫時無法使用，已改用內建翻譯。';
     setNotice(text);
     try {
       if (!(await installTranslator(active, 'basic'))) return;
-      setNotice(text);
+      setPassingNotice(text);
       refresh();
     } catch {
-      stop(false);
-      setNotice('翻譯中斷，請再按一次 EN／中。');
+      // installTranslator left the job without a translator: English only.
+      active.fellBack = 'english';
+      setPassingNotice(globalThis.Translator
+        ? 'AI 暫時無法使用，內建翻譯也無法啟動。請切到「基本」並按 EN／中下載語言模型。'
+        : 'AI 暫時無法使用，這個 Chrome 環境也無法使用內建翻譯。');
     }
   }
 
   async function switchTier(next) {
     tier = next;
     cache.clear();
+    if (job) job.fellBack = undefined;
     if (!timing.hidden) showTiming();
     const active = job;
     if (!active) return;
@@ -717,6 +747,11 @@
   }
 
   async function chooseTier(next) {
+    // Storage would not change, so retry the AI tier here.
+    if (next === tier && tier !== 'basic' && job?.fellBack) {
+      void switchTier(next);
+      return;
+    }
     try {
       const stored = await chrome.storage.local.get(SETTINGS_KEY);
       await chrome.storage.local.set({ [SETTINGS_KEY]: { ...mergeSettings(stored[SETTINGS_KEY]), tier: next } });
