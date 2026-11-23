@@ -94,14 +94,19 @@
       for (;;) {
         if (destroyed) throw abortError();
         if (results.has(text)) return results.get(text);
-        await (pending.get(text) || startBatch(text));
+        try {
+          await (pending.get(text) || startBatch(text));
+        } catch (err) {
+          if (destroyed) throw abortError();
+          throw err;
+        }
       }
     }
 
     function translate(text, { signal } = {}) {
       if (destroyed || (signal && signal.aborted)) return Promise.reject(abortError());
       const work = resolveText(text).then((out) => {
-        recent = [...recent, text].slice(-CONTEXT_SIZE);
+        if (!(signal && signal.aborted)) recent = [...recent, text].slice(-CONTEXT_SIZE);
         return out;
       });
       if (!signal) return work;

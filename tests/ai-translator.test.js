@@ -68,3 +68,46 @@ test('translate after destroy rejects with AbortError', async () => {
   await assert.rejects(t.translate('a', {}), (e) => e.name === 'AbortError');
   assert.equal(calls.length, 1);
 });
+
+function deferredSend() {
+  let settle;
+  const gate = new Promise((resolve) => { settle = resolve; });
+  return { send: async () => gate, settle };
+}
+
+test('in-flight call rejects with AbortError when destroyed, even if send then fails', async () => {
+  const { send, settle } = deferredSend();
+  const t = ai.createAiTranslator({ tier: 'aiFree', getSentences: () => ['a'], send });
+  const pending = t.translate('a', {});
+  t.destroy();
+  settle({ ok: false, error: 'http-429' });
+  await assert.rejects(pending, (e) => e.name === 'AbortError');
+});
+
+test('in-flight call rejects with AbortError when destroyed, even if send then succeeds', async () => {
+  const { send, settle } = deferredSend();
+  const t = ai.createAiTranslator({ tier: 'aiFree', getSentences: () => ['a'], send });
+  const pending = t.translate('a', {});
+  t.destroy();
+  settle(reply(['a']));
+  await assert.rejects(pending, (e) => e.name === 'AbortError');
+});
+
+test('aborted caller whose batch later fails leaves no unhandled rejection', async () => {
+  const seen = [];
+  const spy = (err) => seen.push(err);
+  process.on('unhandledRejection', spy);
+  try {
+    const { send, settle } = deferredSend();
+    const t = ai.createAiTranslator({ tier: 'aiFree', getSentences: () => ['a'], send });
+    const controller = new AbortController();
+    const pending = t.translate('a', { signal: controller.signal });
+    controller.abort();
+    await assert.rejects(pending, (e) => e.name === 'AbortError');
+    settle({ ok: false, error: 'http-500' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(seen, []);
+  } finally {
+    process.off('unhandledRejection', spy);
+  }
+});
