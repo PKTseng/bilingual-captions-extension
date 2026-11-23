@@ -29,8 +29,27 @@
     return item;
   }
 
-  const toggle = element('button', 'bce-toggle', 'EN／中');
+  // The lower subtitle band highlights the translation when enabled.
+  // Built with createElementNS because YouTube enforces Trusted Types.
+  function svgElement(tag, attributes) {
+    const item = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [name, value] of Object.entries(attributes)) item.setAttribute(name, value);
+    return item;
+  }
+  const toggle = element('button', 'bce-toggle');
   toggle.type = 'button';
+  const toggleIcon = svgElement('svg', {
+    viewBox: '0 0 24 24', width: '24', height: '24', fill: 'currentColor',
+    'fill-rule': 'evenodd', 'aria-hidden': 'true',
+  });
+  toggleIcon.append(
+    svgElement('path', { d: 'M5 5h14a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Zm1 2v2h7V7Zm9 0v2h3V7Z' }),
+    svgElement('path', {
+      d: 'M5 13h14a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2Zm1 2v2h11v-2Z',
+      class: 'bce-toggle-translation',
+    }),
+  );
+  toggle.append(toggleIcon);
   const overlay = element('div', 'bce-overlay');
   const card = element('div', 'bce-card');
   const original = element('div', 'bce-line bce-original');

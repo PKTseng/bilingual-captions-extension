@@ -2,22 +2,46 @@
   display: none !important;
 }
 
+/* The highlighted translation and underline mark the pressed state. */
 #movie_player .bce-toggle {
+  position: relative;
   box-sizing: border-box;
-  min-width: 42px;
+  width: 48px;
   height: 100%;
-  padding: 0 7px;
+  padding: 0;
   border: 0;
   background: transparent;
   color: #fff;
-  font: 650 12px/1 system-ui, sans-serif;
+  opacity: 0.9;
   cursor: pointer;
   vertical-align: top;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.1s ease;
 }
 
-#movie_player .bce-toggle:hover { background: rgb(255 255 255 / 15%); }
-#movie_player .bce-toggle[aria-pressed="true"] { color: #9cd8ff; }
-#movie_player .bce-toggle:focus-visible { outline: 2px solid #9cd8ff; outline-offset: -2px; }
+#movie_player .bce-toggle svg { display: block; pointer-events: none; }
+#movie_player .bce-toggle .bce-toggle-translation { transition: fill 0.15s ease; }
+#movie_player .bce-toggle:hover { opacity: 1; }
+#movie_player .bce-toggle[aria-pressed="true"] { opacity: 1; }
+#movie_player .bce-toggle[aria-pressed="true"] .bce-toggle-translation { fill: #73e5b3; }
+
+#movie_player .bce-toggle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: calc(50% - 17px);
+  width: 20px;
+  height: 3px;
+  border-radius: 2px;
+  background: #73e5b3;
+  transform: translateX(-50%) scaleX(0);
+  transition: transform 0.15s ease;
+}
+
+#movie_player .bce-toggle[aria-pressed="true"]::after { transform: translateX(-50%) scaleX(1); }
+#movie_player .bce-toggle:focus-visible { outline: 2px solid #7dd3fc; outline-offset: -4px; border-radius: 6px; }
 
 .bce-overlay {
   position: absolute;
