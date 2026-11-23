@@ -298,6 +298,29 @@
   document.addEventListener('pointerdown', (event) => {
     if (menu.hidden || menu.contains(event.target) || toggle.contains(event.target)) return;
     closeMenu(false);
+    // Like YouTube's own settings menu, a press on the video that closes the
+    // menu does nothing else (no play/pause). YouTube's controls, our own UI
+    // and anything outside the player keep the normal press.
+    const target = event.target;
+    if (!(target instanceof Element) || !player?.contains(target)
+      || target.closest('.ytp-chrome-top, .ytp-chrome-bottom, [class*="ytp-popup"], [class*="bce-"]')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const swallow = (clickEvent) => {
+      if (clickEvent.type === 'click' && !player?.contains(clickEvent.target)) return;
+      release();
+      if (clickEvent.type !== 'click') return;
+      clickEvent.stopPropagation();
+      clickEvent.preventDefault();
+    };
+    const timer = setTimeout(release, 600);
+    function release() {
+      clearTimeout(timer);
+      window.removeEventListener('click', swallow, true);
+      window.removeEventListener('pointercancel', swallow, true);
+    }
+    window.addEventListener('click', swallow, true);
+    window.addEventListener('pointercancel', swallow, true);
   }, true);
   document.addEventListener('keydown', (event) => {
     if (menu.hidden || event.key !== 'Escape') return;
@@ -433,6 +456,7 @@
   for (const type of ['pointerdown', 'pointerup', 'pointermove', 'mousedown', 'mouseup',
     'mousemove', 'mouseover', 'mouseout', 'click', 'dblclick', 'contextmenu']) {
     card.addEventListener(type, (event) => event.stopPropagation());
+    notice.addEventListener(type, (event) => event.stopPropagation());
   }
 
   function stop(resetNotice = true) {
@@ -1050,7 +1074,7 @@
     } catch {
       if (job === active) {
         stop(false);
-        setNotice('暫時無法啟動英翻繁中。請確認桌面版 Chrome 支援內建翻譯，再點一次。');
+        setNotice('暫時無法啟動英翻繁中。請確認桌面版 Chrome 支援內建翻譯，再到雙語字幕選單重新開啟。');
       }
     }
   }

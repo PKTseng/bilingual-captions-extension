@@ -199,7 +199,7 @@
   right: var(--bce-menu-right, 12px);
   bottom: var(--bce-menu-bottom, 61px);
   box-sizing: border-box;
-  width: 300px;
+  width: 320px;
   max-width: calc(100% - 24px);
   max-height: calc(100% - var(--bce-menu-bottom, 61px) - 12px);
   overflow: hidden auto;
@@ -256,7 +256,7 @@
 .bce-menu-value {
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 62%;
+  max-width: 70%;
   overflow: hidden;
   color: rgb(255 255 255 / 70%);
   white-space: nowrap;
