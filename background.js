@@ -43,6 +43,11 @@ async function handleAi({ tier, messages }) {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // From the player menu's 「API key 與模型設定…」; no reply.
+  if (msg?.type === 'bce-open-options') {
+    chrome.runtime.openOptionsPage().catch((error) => console.warn('[bce] 無法打開設定頁：', error));
+    return;
+  }
   if (!msg || msg.type !== 'bce-ai') return;
   handleAi(msg).then(sendResponse, () => sendResponse({ ok: false, error: 'network' }));
   return true;

@@ -11,10 +11,14 @@
   const LIVE_GAP_MS = 900;
   const { sentenceCues, readTranscript, openTranscript } = globalThis.bceTranscript;
   const { requestTimedText, cachedTimedText } = globalThis.bcePageBridge;
-  const { TIERS, TIER_LABELS, SETTINGS_KEY, mergeSettings } = globalThis.bceSettings;
+  const {
+    TIERS, TIER_LABELS, SETTINGS_KEY, mergeSettings, describeTier,
+  } = globalThis.bceSettings;
   const { createAiTranslator, CONTEXT_SIZE } = globalThis.bceAiTranslator;
   const PASSING_NOTICE_MS = 6000;
   let tier = 'basic';
+  // Only the tier and model names are read here (SETTINGS_KEY), never API keys.
+  let settings = mergeSettings();
   let videoId;
   let player;
   let job;
@@ -41,6 +45,8 @@
   }
   const toggle = element('button', 'bce-toggle');
   toggle.type = 'button';
+  toggle.title = '雙語字幕選單';
+  toggle.setAttribute('aria-label', '雙語字幕選單');
   const toggleIcon = svgElement('svg', {
     viewBox: '0 0 24 24', width: '24', height: '24', fill: 'none', stroke: 'currentColor',
     'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true',
@@ -75,23 +81,7 @@
   fileInput.type = 'file';
   fileInput.accept = '.srt,.vtt';
   fileInput.hidden = true;
-  const timing = element('div', 'bce-timing');
-  const sourceLabel = element('div', 'bce-source');
-  const earlier = element('button', 'bce-import', '提早 0.5 秒');
-  const later = element('button', 'bce-import', '延後 0.5 秒');
-  earlier.type = 'button';
-  later.type = 'button';
-  const tierRow = element('div', 'bce-tiers');
-  const tierButtons = TIERS.map((name) => {
-    const button = element('button', 'bce-import', TIER_LABELS[name]);
-    button.type = 'button';
-    button.dataset.tier = name;
-    return button;
-  });
-  tierRow.append(...tierButtons);
-  timing.append(sourceLabel, earlier, later, tierRow);
-  timing.hidden = true;
-  notice.append(message, importButton, fileInput, timing);
+  notice.append(message, importButton, fileInput);
   notice.hidden = true;
   // Marks this version's elements; subtitles.css hides unmarked ones left by
   // an older copy of the extension that is still loaded in Chrome.
@@ -103,46 +93,251 @@
     clearTimeout(noticeTimer);
     message.textContent = text;
     notice.hidden = !text;
-    timing.hidden = true;
   }
 
-  // A notice that goes away by itself, unless something replaced it or the
-  // settings panel is open.
+  // A notice that goes away by itself, unless something replaced it.
   function setPassingNotice(text) {
     setNotice(text);
     noticeTimer = setTimeout(() => {
-      if (message.textContent === text && timing.hidden) setNotice('');
+      if (message.textContent === text) setNotice('');
     }, PASSING_NOTICE_MS);
   }
 
-  function showTiming() {
-    const label = advanceSeconds === 0 ? '原始時間碼'
-      : `字幕${advanceSeconds > 0 ? '提早' : '延後'} ${Math.abs(advanceSeconds).toFixed(1)} 秒`;
-    const source = job?.source ?? importedSource;
-    const timed = job?.cues.length || imported.length;
-    const wordTimed = job ? job.wordTimed : imported.some((cue) => cue.marks?.length);
-    const sourceText = source ? `字幕來源：${source}${timed ? ` · ${label} · ${wordTimed ? '含原始字詞時間碼' : '字詞高亮為估算'}` : ''}` : '尚未選擇字幕來源';
-    const inUse = !job?.fellBack || tier === 'basic' ? TIER_LABELS[tier]
-      : `${job.fellBack === 'english' ? '僅英文' : TIER_LABELS.basic}（AI 已暫停，點「${TIER_LABELS[tier]}」重試）`;
-    sourceLabel.textContent = `${sourceText} · 翻譯：${inUse}`;
-    for (const button of tierButtons) button.setAttribute('aria-pressed', String(button.dataset.tier === tier));
-    earlier.hidden = later.hidden = !timed;
-    earlier.disabled = advanceSeconds >= 10;
-    later.disabled = advanceSeconds <= -10;
-    timing.hidden = false;
+  // ---- Player menu ----
+  // The player icon opens this panel, modelled on YouTube's settings menu: a
+  // main page and the translation and timing sub-pages. renderMenu() rebuilds
+  // the open page from the shared state; updateMenu() does so if it is open.
+  const menu = element('div', 'bce-menu');
+  menu.id = 'bce-menu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', '雙語字幕選單');
+  menu.dataset.bce = 'current';
+  menu.hidden = true;
+  let menuPage = 'main';
+  toggle.setAttribute('aria-haspopup', 'menu');
+  toggle.setAttribute('aria-controls', menu.id);
+  toggle.setAttribute('aria-expanded', 'false');
+
+  const hasTiming = () => Boolean(job?.cues.length || imported.length);
+
+  function tierValue() {
+    if (!job?.fellBack || tier === 'basic') return describeTier(settings, tier);
+    return job.fellBack === 'english' ? '僅英文（AI 已暫停）' : '基本（AI 已暫停）';
   }
+
+  function timingValue() {
+    if (advanceSeconds === 0) return '原始';
+    return `${advanceSeconds > 0 ? '提早' : '延後'} ${Math.abs(advanceSeconds).toFixed(1)} 秒`;
+  }
+
+  function sourceValue() {
+    const source = job?.source ?? importedSource;
+    if (!source) return '尚未選擇字幕來源';
+    const wordTimed = job ? job.wordTimed : imported.some((cue) => cue.marks?.length);
+    const detail = hasTiming() ? (wordTimed ? '含原始字詞時間碼' : '字詞高亮為估算')
+      : source === '即時 CC' ? '等字幕送到才能合句，可匯入 SRT 使用時間碼' : '';
+    return `字幕來源：${source}${detail ? ` · ${detail}` : ''}`;
+  }
+
+  function glyph(className, text) {
+    const item = element('span', className, text);
+    item.setAttribute('aria-hidden', 'true');
+    return item;
+  }
+
+  function menuItem(key, label, action, { role = 'menuitem', value, next, checked, disabled } = {}) {
+    const item = element('button', 'bce-menu-item');
+    item.type = 'button';
+    item.dataset.key = key;
+    item.setAttribute('role', role);
+    if (checked !== undefined) item.setAttribute('aria-checked', String(checked));
+    if (next) item.setAttribute('aria-haspopup', 'menu');
+    item.disabled = Boolean(disabled);
+    item.append(element('span', 'bce-menu-label', label));
+    if (value) item.append(element('span', 'bce-menu-value', value));
+    if (next) item.append(glyph('bce-menu-next', '›'));
+    item.addEventListener('click', action);
+    return item;
+  }
+
+  function backItem(label, value) {
+    const item = menuItem('back', label, () => showMenuPage('main'), { value });
+    item.classList.add('bce-menu-back');
+    item.setAttribute('aria-label', `返回：${label}${value ? `，${value}` : ''}`);
+    item.prepend(glyph('bce-menu-prev', '‹'));
+    return item;
+  }
+
+  function mainPage() {
+    // begin() runs inside the click, so the built-in translator's model
+    // download still has the user activation it needs.
+    const onOff = menuItem('switch', '雙語字幕', () => void begin(),
+      { role: 'menuitemcheckbox', checked: Boolean(job) });
+    onOff.append(glyph('bce-menu-switch'));
+    return [
+      onOff,
+      menuItem('tier', '翻譯', () => showMenuPage('tier'), { value: tierValue(), next: true }),
+      menuItem('timing', '字幕時間', () => showMenuPage('timing'),
+        { value: timingValue(), next: true, disabled: !hasTiming() }),
+      menuItem('import', '匯入英文 SRT／VTT', () => {
+        closeMenu(true);
+        fileInput.click();
+      }),
+      menuItem('options', 'API key 與模型設定…', () => {
+        closeMenu(true);
+        openOptions();
+      }),
+      element('div', 'bce-menu-source', sourceValue()),
+    ];
+  }
+
+  // The switch itself happens in onSettingsChanged, so the options page and
+  // other tabs follow the same tier; chooseTier retries an AI tier that fell back.
+  function tierPage() {
+    return [
+      backItem('翻譯'),
+      ...TIERS.map((name) => {
+        const item = menuItem(`tier-${name}`, describeTier(settings, name), () => {
+          void chooseTier(name);
+          showMenuPage('main');
+        }, { role: 'menuitemradio', checked: tier === name });
+        item.prepend(glyph('bce-menu-check'));
+        return item;
+      }),
+    ];
+  }
+
+  function timingPage() {
+    return [
+      backItem('字幕時間', timingValue()),
+      menuItem('earlier', '提早 0.5 秒', () => shiftTiming(0.5), { disabled: advanceSeconds >= 10 }),
+      menuItem('later', '延後 0.5 秒', () => shiftTiming(-0.5), { disabled: advanceSeconds <= -10 }),
+      menuItem('reset', '重設', () => {
+        advanceSeconds = 0;
+        refresh();
+        updateMenu();
+      }),
+    ];
+  }
+
+  const firstMenuItem = () => menu.querySelector('button:not(:disabled)');
+
+  // Rebuilding drops the focused row, so focus goes back to the row with the
+  // same key (or `preferKey`), else the first enabled one.
+  function renderMenu(preferKey) {
+    const focused = menu.contains(document.activeElement) ? document.activeElement.dataset.key : undefined;
+    if (menuPage === 'timing' && !hasTiming()) menuPage = 'main';
+    menu.replaceChildren(...(menuPage === 'tier' ? tierPage()
+      : menuPage === 'timing' ? timingPage() : mainPage()));
+    const key = preferKey ?? focused;
+    if (focused !== undefined) {
+      (menu.querySelector(`[data-key="${key}"]:not(:disabled)`) ?? firstMenuItem())?.focus();
+    }
+    placeMenu();
+  }
+
+  function updateMenu() {
+    if (!menu.hidden) renderMenu();
+  }
+
+  // Back on the main page, the row that opened the sub-page keeps focus.
+  function showMenuPage(page) {
+    const from = menuPage;
+    menuPage = page;
+    renderMenu(page === 'main' ? from : undefined);
+  }
+
+  function openMenu(fromKeyboard) {
+    syncPage();
+    if (retired || !player) return;
+    if (menu.parentNode !== player) player.append(menu);
+    menuPage = 'main';
+    menu.hidden = false;
+    toggle.setAttribute('aria-expanded', 'true');
+    renderMenu();
+    if (fromKeyboard) firstMenuItem()?.focus();
+  }
+
+  function closeMenu(focusToggle) {
+    if (menu.hidden) return;
+    menu.hidden = true;
+    toggle.setAttribute('aria-expanded', 'false');
+    if (focusToggle && toggle.isConnected) toggle.focus();
+  }
+
+  // Above the controls, right edge lined up with the icon, inside the player.
+  function placeMenu() {
+    if (menu.hidden || !player || menu.parentNode !== player) return;
+    const box = player.getBoundingClientRect();
+    const bar = player.querySelector('.ytp-chrome-bottom');
+    const barTop = bar?.getClientRects().length ? bar.getBoundingClientRect().top : box.bottom - 48;
+    const bottom = Math.max(12, Math.round(box.bottom - barTop) + 12);
+    const icon = toggle.isConnected && toggle.getClientRects().length ? toggle.getBoundingClientRect() : undefined;
+    const right = Math.max(12, Math.min(icon ? Math.round(box.right - icon.right) : 12,
+      player.clientWidth - menu.offsetWidth - 12));
+    for (const [name, value] of [['--bce-menu-bottom', `${bottom}px`], ['--bce-menu-right', `${right}px`]]) {
+      if (menu.style.getPropertyValue(name) !== value) menu.style.setProperty(name, value);
+    }
+  }
+
+  function openOptions() {
+    try {
+      chrome.runtime.sendMessage({ type: 'bce-open-options' })?.catch?.(() => {});
+    } catch {
+      setPassingNotice('無法打開設定頁，請重新整理頁面。');
+    }
+  }
+
+  // A keyboard press on the icon (detail 0) moves focus into the menu.
+  // Opening or closing the menu never starts or stops the captions.
+  toggle.addEventListener('click', (event) => {
+    if (menu.hidden) openMenu(event.detail === 0);
+    else closeMenu(false);
+  });
+  // Capture phase, so this runs before YouTube handles the press.
+  document.addEventListener('pointerdown', (event) => {
+    if (menu.hidden || menu.contains(event.target) || toggle.contains(event.target)) return;
+    closeMenu(false);
+  }, true);
+  document.addEventListener('keydown', (event) => {
+    if (menu.hidden || event.key !== 'Escape') return;
+    event.stopPropagation();
+    closeMenu(true);
+  }, true);
+  menu.addEventListener('keydown', (event) => {
+    const active = document.activeElement;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const items = [...menu.querySelectorAll('button:not(:disabled)')];
+      const index = items.indexOf(active);
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      items[index < 0 ? (step > 0 ? 0 : items.length - 1) : (index + step + items.length) % items.length]?.focus();
+    } else if (event.key === 'ArrowLeft' && menuPage !== 'main') {
+      event.preventDefault();
+      showMenuPage('main');
+    } else if (event.key === 'ArrowRight' && menu.contains(active) && active.getAttribute('aria-haspopup')) {
+      event.preventDefault();
+      active.click();
+    }
+  });
+  // Like the caption card, clicks and keys on the menu must not reach the
+  // player (play/pause, fullscreen, shortcuts). Pointer movement does reach
+  // it, so YouTube keeps its controls up while the pointer moves on the menu.
+  for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick',
+    'contextmenu', 'keydown', 'keyup', 'keypress']) {
+    menu.addEventListener(type, (event) => event.stopPropagation());
+  }
+  // ---- End of player menu ----
 
   function shiftTiming(amount) {
     advanceSeconds = Math.max(-10, Math.min(10, advanceSeconds + amount));
-    showTiming();
+    updateMenu();
     refresh();
   }
 
   function updateToggle() {
-    const label = job ? '關閉英中雙字幕' : '開啟英中雙字幕';
-    toggle.title = label;
-    toggle.setAttribute('aria-label', label);
     toggle.setAttribute('aria-pressed', String(Boolean(job)));
+    updateMenu();
   }
 
   function clearOverlay() {
@@ -290,6 +485,7 @@
     const nextId = idFromUrl();
     const nextPlayer = nextId ? document.querySelector('#movie_player') : null;
     if (nextId !== videoId || nextPlayer !== player) {
+      closeMenu(false);
       stop();
       if (nextId !== videoId) {
         imported = [];
@@ -299,6 +495,7 @@
       toggle.remove();
       overlay.remove();
       notice.remove();
+      menu.remove();
       videoId = nextId;
       player = nextPlayer;
     }
@@ -306,7 +503,9 @@
     const controls = player.querySelector('.ytp-right-controls');
     if (controls && toggle.parentNode !== controls) controls.prepend(toggle);
     if (overlay.parentNode !== player) player.append(overlay, notice);
+    if (menu.parentNode !== player) player.append(menu);
     placeOverlay();
+    placeMenu();
   }
 
   // CC that was already on before this script loaded won't request again by
@@ -335,7 +534,7 @@
     active.inFlight?.controller.abort();
     currentText = '';
     clearOverlay();
-    if (!timing.hidden) showTiming();
+    updateMenu();
     refresh();
   }
 
@@ -498,7 +697,7 @@
     renderCaption(text, result, cue);
     if (text && active.translator && !active.receivedCaption) {
       active.receivedCaption = true;
-      if (timing.hidden) setNotice('');
+      setNotice('');
     }
   }
 
@@ -554,7 +753,7 @@
     if (!active.translator) return;
     if (!active.receivedCaption) {
       active.receivedCaption = true;
-      if (timing.hidden) setNotice('');
+      setNotice('');
     }
     if (!cache.has(sentence) && !active.inFlight) {
       void translateCaption(active, sentence);
@@ -572,7 +771,7 @@
       if (cues.length) {
         active.cues = cues;
         active.source = 'YouTube 逐字稿';
-        if (!timing.hidden) showTiming();
+        updateMenu();
         active.transcriptUntil = 0;
         active.inFlight?.controller.abort();
         currentText = '';
@@ -598,7 +797,7 @@
 
     if (currentText && active.translator && !active.receivedCaption) {
       active.receivedCaption = true;
-      if (timing.hidden) setNotice('');
+      setNotice('');
     }
     if (!active.translator || active.inFlight) return;
     if (currentText && !cache.has(currentText)) {
@@ -638,7 +837,7 @@
         return;
       }
       stop(false);
-      setNotice('翻譯中斷，請再按一次 EN／中。');
+      setNotice('翻譯中斷，請在雙語字幕選單重新開啟。');
     } finally {
       active.inFlight = undefined;
       if (job === active) refresh();
@@ -705,6 +904,7 @@
     console.warn('[bce] AI 翻譯失敗：', error?.code ?? error);
     cache.clear();
     active.fellBack = 'basic';
+    updateMenu();
     const text = error?.code === 'no-key'
       ? '請先在設定頁填入 OpenRouter／Gemini 的 API key，已改用內建翻譯。'
       : error?.code === 'bad-key'
@@ -718,8 +918,9 @@
     } catch {
       // installTranslator left the job without a translator: English only.
       active.fellBack = 'english';
+      updateMenu();
       setPassingNotice(globalThis.Translator
-        ? 'AI 暫時無法使用，內建翻譯也無法啟動。請切到「基本」並按 EN／中下載語言模型。'
+        ? 'AI 暫時無法使用，內建翻譯也無法啟動。請在選單把翻譯切到「基本」，再重新開啟雙語字幕下載語言模型。'
         : 'AI 暫時無法使用，這個 Chrome 環境也無法使用內建翻譯。');
     }
   }
@@ -728,7 +929,7 @@
     tier = next;
     cache.clear();
     if (job) job.fellBack = undefined;
-    if (!timing.hidden) showTiming();
+    updateMenu();
     const active = job;
     if (!active) return;
     if (next === 'basic' && !globalThis.Translator) {
@@ -738,11 +939,11 @@
     }
     try {
       if (!(await installTranslator(active, next))) return;
-      if (!timing.hidden) showTiming();
+      updateMenu();
       refresh();
     } catch {
       stop(false);
-      setNotice('翻譯中斷，請再按一次 EN／中。');
+      setNotice('翻譯中斷，請在雙語字幕選單重新開啟。');
     }
   }
 
@@ -762,15 +963,18 @@
 
   function onSettingsChanged(changes, areaName) {
     if (retired || areaName !== 'local' || !changes[SETTINGS_KEY]) return;
-    const next = mergeSettings(changes[SETTINGS_KEY].newValue).tier;
-    if (next !== tier) void switchTier(next);
+    settings = mergeSettings(changes[SETTINGS_KEY].newValue);
+    if (settings.tier !== tier) void switchTier(settings.tier);
+    else updateMenu();
   }
 
   async function loadTier() {
     try {
       const stored = await chrome.storage.local.get(SETTINGS_KEY);
-      const next = mergeSettings(stored[SETTINGS_KEY]).tier;
-      if (!retired && next !== tier) void switchTier(next);
+      if (retired) return;
+      settings = mergeSettings(stored[SETTINGS_KEY]);
+      if (settings.tier !== tier) void switchTier(settings.tier);
+      else updateMenu();
     } catch {
       // Orphaned copy: keep the built-in translator.
     }
@@ -851,23 +1055,6 @@
     }
   }
 
-  toggle.addEventListener('click', begin);
-  toggle.addEventListener('contextmenu', (event) => {
-    event.preventDefault();
-    if (!timing.hidden) {
-      setNotice('');
-      return;
-    }
-    setNotice(job?.source === '即時 CC' ? '即時 CC 會等字幕送到才能合句。可匯入 SRT 使用時間碼。' : '字幕設定');
-    showTiming();
-  });
-  earlier.addEventListener('click', () => shiftTiming(0.5));
-  later.addEventListener('click', () => shiftTiming(-0.5));
-  // The switch itself happens in onSettingsChanged, so the options page and
-  // other tabs follow the same tier.
-  for (const button of tierButtons) {
-    button.addEventListener('click', () => void chooseTier(button.dataset.tier));
-  }
   importButton.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', async () => {
     const file = fileInput.files[0];
@@ -887,7 +1074,8 @@
       imported = sentenceCues(entries);
       importedSource = source;
       advanceSeconds = 0;
-      setNotice(`已讀取 ${entries.length} 段字幕。請按 EN／中開始翻譯。`);
+      setNotice(`已讀取 ${entries.length} 段字幕。請在雙語字幕選單開啟。`);
+      updateMenu();
     } catch {
       if (idFromUrl() === id) setNotice('無法讀取這個字幕檔。');
     }
@@ -914,10 +1102,12 @@
     } catch {
       // Orphaned copy: its listener no longer fires anyway.
     }
+    closeMenu(false);
     stop();
     toggle.remove();
     overlay.remove();
     notice.remove();
+    menu.remove();
   }, { once: true });
 
   updateToggle();

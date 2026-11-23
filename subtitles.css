@@ -1,4 +1,4 @@
-.bce-overlay[hidden], .bce-notice[hidden], .bce-notice input[hidden] {
+.bce-overlay[hidden], .bce-notice[hidden], .bce-notice input[hidden], .bce-menu[hidden] {
   display: none !important;
 }
 
@@ -190,24 +190,165 @@
   cursor: pointer;
 }
 
-.bce-timing[hidden], .bce-timing button[hidden] {
-  display: none;
+/* Player menu, modelled on YouTube's settings menu. content.js sets
+   --bce-menu-bottom (just above the controls) and --bce-menu-right (lined up
+   with the icon). */
+#movie_player .bce-menu {
+  position: absolute;
+  z-index: 72;
+  right: var(--bce-menu-right, 12px);
+  bottom: var(--bce-menu-bottom, 61px);
+  box-sizing: border-box;
+  width: 300px;
+  max-width: calc(100% - 24px);
+  max-height: calc(100% - var(--bce-menu-bottom, 61px) - 12px);
+  overflow: hidden auto;
+  padding: 8px 0;
+  border-radius: 12px;
+  background: rgb(28 28 28 / 90%);
+  color: #eee;
+  font: 500 14px/1.3 "YouTube Noto", Roboto, Arial, system-ui, sans-serif;
+  text-shadow: 0 0 2px rgb(0 0 0 / 50%);
+  cursor: default;
+  user-select: none;
+  scrollbar-width: thin;
 }
 
-.bce-source {
+@supports (backdrop-filter: blur(8px)) {
+  #movie_player .bce-menu {
+    background: rgb(28 28 28 / 80%);
+    backdrop-filter: blur(8px);
+  }
+}
+
+#movie_player .bce-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 40px;
+  margin: 0;
+  padding: 0 15px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-shadow: inherit;
+  cursor: pointer;
+}
+
+#movie_player .bce-menu-item:hover:not(:disabled),
+#movie_player .bce-menu-item:focus-visible {
+  background: rgb(255 255 255 / 10%);
+}
+
+#movie_player .bce-menu-item:focus-visible { outline: 2px solid #7dd3fc; outline-offset: -2px; }
+#movie_player .bce-menu-item:disabled { opacity: 0.5; cursor: default; }
+
+.bce-menu-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The current value of a row, e.g. the translation tier. */
+.bce-menu-value {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 62%;
+  overflow: hidden;
+  color: rgb(255 255 255 / 70%);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.bce-menu-next, .bce-menu-prev {
+  flex: none;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.bce-menu-next { margin-left: -6px; color: rgb(255 255 255 / 70%); }
+.bce-menu-prev { margin-right: -4px; }
+
+/* A sub-page's header row leads back to the main page. */
+#movie_player .bce-menu-back {
+  margin: -8px 0 8px;
+  padding-top: 4px;
+  border-bottom: 1px solid rgb(255 255 255 / 20%);
+  min-height: 48px;
+}
+
+.bce-menu-back .bce-menu-value { color: rgb(255 255 255 / 70%); }
+
+.bce-menu-check {
+  position: relative;
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+
+.bce-menu-item[aria-checked="true"] .bce-menu-check::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 1px;
+  width: 5px;
+  height: 11px;
+  border: solid currentColor;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* Small pill switch for 雙語字幕 on/off. */
+.bce-menu-switch {
+  position: relative;
+  flex: none;
+  width: 36px;
+  height: 14px;
+  margin-right: 2px;
+  border-radius: 14px;
+  background: rgb(255 255 255 / 30%);
+  transition: background 0.1s ease;
+}
+
+.bce-menu-switch::after {
+  content: "";
+  position: absolute;
+  top: -3px;
+  left: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #bdbdbd;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 60%);
+  transition: transform 0.1s ease, background 0.1s ease;
+}
+
+.bce-menu-item[aria-checked="true"] .bce-menu-switch { background: #f00; }
+.bce-menu-item[aria-checked="true"] .bce-menu-switch::after { background: #fff; transform: translateX(16px); }
+
+/* The caption source, in small print at the bottom of the main page. */
+.bce-menu-source {
   margin-top: 8px;
+  padding: 8px 15px 2px;
+  border-top: 1px solid rgb(255 255 255 / 20%);
+  color: rgb(255 255 255 / 60%);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
-.bce-timing button + button {
-  margin-left: 6px;
+/* Fullscreen and other large players use bigger controls, so the menu grows too. */
+#movie_player.ytp-big-mode .bce-menu {
+  width: 360px;
+  font-size: 17px;
 }
 
-/* The selected translation tier. */
-.bce-tiers .bce-import[aria-pressed="true"] {
-  border-color: #73e5b3;
-  background: #1f3a30;
-  color: #73e5b3;
-}
+#movie_player.ytp-big-mode .bce-menu-item { min-height: 48px; padding: 0 20px; }
+#movie_player.ytp-big-mode .bce-menu-source { padding-inline: 20px; font-size: 14px; }
 
 /* KTV-style sweep: the highlight colour slides across each word from left to
    right; content.js moves --bce-fill from 0% to 100% while the word is spoken.
@@ -227,7 +368,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .bce-overlay, .bce-copied, .bce-card .bce-word {
+  .bce-overlay, .bce-copied, .bce-card .bce-word, .bce-menu-switch, .bce-menu-switch::after {
     transition: none;
   }
   .bce-card .bce-word.bce-flash {
@@ -238,6 +379,7 @@
 /* Hide the button and subtitles of an older copy of this extension that is still loaded. */
 .bce-toggle:not([data-bce]),
 .bce-overlay:not([data-bce]),
-.bce-notice:not([data-bce]) {
+.bce-notice:not([data-bce]),
+.bce-menu:not([data-bce]) {
   display: none !important;
 }
