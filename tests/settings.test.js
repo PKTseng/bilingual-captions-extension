@@ -30,6 +30,20 @@ test('buildChatRequest targets provider endpoint with bearer key', () => {
   assert.deepEqual(JSON.parse(req.init.body), { model: 'm1', messages: msgs, temperature: 0.2 });
 });
 
+test('httpErrorCode maps auth failures to bad-key', () => {
+  assert.equal(s.httpErrorCode(401), 'bad-key');
+  assert.equal(s.httpErrorCode(403), 'bad-key');
+  assert.equal(s.httpErrorCode(429), 'http-429');
+  assert.equal(s.httpErrorCode(500), 'http-500');
+});
+
+test('fetchErrorCode tells a timeout from a network failure', () => {
+  assert.equal(s.REQUEST_TIMEOUT_MS, 25000);
+  assert.equal(s.fetchErrorCode(new DOMException('timed out', 'TimeoutError')), 'timeout');
+  assert.equal(s.fetchErrorCode(new TypeError('Failed to fetch')), 'network');
+  assert.equal(s.fetchErrorCode(undefined), 'network');
+});
+
 test('buildChatRequest reports missing key and basic tier', () => {
   const settings = s.mergeSettings({});
   assert.deepEqual(s.buildChatRequest(settings, {}, 'aiFree', []), { error: 'no-key' });

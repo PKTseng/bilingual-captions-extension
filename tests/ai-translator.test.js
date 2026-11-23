@@ -21,6 +21,26 @@ test('buildBatch takes following unique undone lines with preceding context', ()
   assert.deepEqual(ai.buildBatch(s, 'b', () => false, []).lines, ['b', 'c', 'd', 'e', 'f', 'g']);
 });
 
+test('batch sizes: small first batch, larger follow-up batches', () => {
+  assert.equal(ai.FIRST_BATCH_SIZE, 8);
+  assert.equal(ai.BATCH_SIZE, 20);
+});
+
+const many = Array.from({ length: 60 }, (_, i) => `s${i}`);
+
+test('buildBatch on a fresh start or seek sends at most FIRST_BATCH_SIZE lines', () => {
+  assert.deepEqual(ai.buildBatch(many, 's0', () => false, []).lines, many.slice(0, 8));
+  // Seek: the line just before is neither done nor pending.
+  const seek = ai.buildBatch(many, 's30', (t) => t === 's10', []);
+  assert.deepEqual(seek.lines, many.slice(30, 38));
+});
+
+test('buildBatch continuing after a done line sends up to BATCH_SIZE lines', () => {
+  const b = ai.buildBatch(many, 's8', (t) => Number(t.slice(1)) < 8, []);
+  assert.deepEqual(b.lines, many.slice(8, 28));
+  assert.deepEqual(b.context, many.slice(3, 8));
+});
+
 test('buildBatch for live captions sends one line with recent context', () => {
   const b = ai.buildBatch([], 'x', () => false, ['1', '2', '3', '4', '5', '6']);
   assert.deepEqual(b, { lines: ['x'], context: ['2', '3', '4', '5', '6'] });

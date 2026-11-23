@@ -4,7 +4,10 @@
 (() => {
   'use strict';
 
-  const BATCH_SIZE = 40;
+  // A fresh start or a seek sends a small batch so the first line comes back
+  // quickly; batches that continue from translated lines can be larger.
+  const FIRST_BATCH_SIZE = 8;
+  const BATCH_SIZE = 20;
   const CONTEXT_SIZE = 5;
 
   const SYSTEM_PROMPT = [
@@ -18,9 +21,11 @@
   function buildBatch(sentences, text, done, recent) {
     const at = sentences.indexOf(text);
     if (at === -1) return { lines: [text], context: recent.slice(-CONTEXT_SIZE) };
+    const continuing = at > 0 && done(sentences[at - 1]);
+    const size = continuing ? BATCH_SIZE : FIRST_BATCH_SIZE;
     const lines = [text];
     const seen = new Set(lines);
-    for (let i = at + 1; i < sentences.length && lines.length < BATCH_SIZE; i++) {
+    for (let i = at + 1; i < sentences.length && lines.length < size; i++) {
       const s = sentences[i];
       if (seen.has(s) || done(s)) continue;
       seen.add(s);
@@ -127,7 +132,7 @@
     return { kind: 'ai', translate, destroy };
   }
 
-  const api = { BATCH_SIZE, CONTEXT_SIZE, buildBatch, buildMessages, parseBatchReply, createAiTranslator };
+  const api = { FIRST_BATCH_SIZE, BATCH_SIZE, CONTEXT_SIZE, buildBatch, buildMessages, parseBatchReply, createAiTranslator };
   globalThis.bceAiTranslator = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

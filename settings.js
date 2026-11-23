@@ -50,7 +50,22 @@
     };
   }
 
-  const api = { SETTINGS_KEY, KEYS_KEY, TIERS, TIER_LABELS, PROVIDERS, DEFAULT_SETTINGS, mergeSettings, buildChatRequest };
+  // Long enough for a slow batch, short enough that the service worker is
+  // still alive to answer.
+  const REQUEST_TIMEOUT_MS = 25000;
+
+  function httpErrorCode(status) {
+    return status === 401 || status === 403 ? 'bad-key' : `http-${status}`;
+  }
+
+  function fetchErrorCode(error) {
+    return error && error.name === 'TimeoutError' ? 'timeout' : 'network';
+  }
+
+  const api = {
+    SETTINGS_KEY, KEYS_KEY, TIERS, TIER_LABELS, PROVIDERS, DEFAULT_SETTINGS, REQUEST_TIMEOUT_MS,
+    mergeSettings, buildChatRequest, httpErrorCode, fetchErrorCode,
+  };
   globalThis.bceSettings = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();
