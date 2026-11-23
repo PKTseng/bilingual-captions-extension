@@ -50,3 +50,15 @@ test('buildChatRequest reports missing key and basic tier', () => {
   assert.deepEqual(s.buildChatRequest(settings, { gemini: '  ' }, 'aiFree', []), { error: 'no-key' });
   assert.deepEqual(s.buildChatRequest(settings, { gemini: 'k' }, 'basic', []), { error: 'bad-tier' });
 });
+
+test('describeTier labels tiers with short model names', () => {
+  const settings = s.mergeSettings({
+    aiFree: { provider: 'openrouter', model: 'meta-llama/llama-4:free' },
+    aiPro: { provider: 'openrouter', model: 'anthropic/claude-sonnet-5.5' },
+  });
+  assert.equal(s.describeTier(settings, 'basic'), '基本（Chrome 內建）');
+  assert.equal(s.describeTier(settings, 'aiFree'), 'AI 免費 · llama-4:free');
+  assert.equal(s.describeTier(settings, 'aiPro'), 'AI 進階 · claude-sonnet-5.5');
+  assert.equal(s.describeTier(s.mergeSettings({}), 'aiFree'), `AI 免費 · ${s.DEFAULT_SETTINGS.aiFree.model}`);
+  assert.equal(s.describeTier(settings, 'weird'), '基本（Chrome 內建）');
+});

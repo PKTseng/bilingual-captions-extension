@@ -62,9 +62,19 @@
     return error && error.name === 'TimeoutError' ? 'timeout' : 'network';
   }
 
+  const BASIC_LABEL = '基本（Chrome 內建）';
+
+  // Human-readable tier label; AI tiers append the model's short name.
+  function describeTier(settings, tier) {
+    if (tier !== 'aiFree' && tier !== 'aiPro') return BASIC_LABEL;
+    const model = String(settings[tier].model);
+    const short = model.slice(model.lastIndexOf('/') + 1);
+    return `${TIER_LABELS[tier]} · ${short}`;
+  }
+
   const api = {
     SETTINGS_KEY, KEYS_KEY, TIERS, TIER_LABELS, PROVIDERS, DEFAULT_SETTINGS, REQUEST_TIMEOUT_MS,
-    mergeSettings, buildChatRequest, httpErrorCode, fetchErrorCode,
+    mergeSettings, buildChatRequest, httpErrorCode, fetchErrorCode, describeTier,
   };
   globalThis.bceSettings = api;
   if (typeof module !== 'undefined') module.exports = api;
