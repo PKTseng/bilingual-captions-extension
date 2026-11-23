@@ -202,6 +202,13 @@
   margin-left: 6px;
 }
 
+/* The selected translation tier. */
+.bce-tiers .bce-import[aria-pressed="true"] {
+  border-color: #73e5b3;
+  background: #1f3a30;
+  color: #73e5b3;
+}
+
 /* KTV-style sweep: the highlight colour slides across each word from left to
    right; content.js moves --bce-fill from 0% to 100% while the word is spoken.
    The text itself is transparent so the gradient shows through, which is why
