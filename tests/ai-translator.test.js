@@ -1,0 +1,70 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const ai = require('../ai-translator.js');
+
+const reply = (lines) => ({ ok: true, text: JSON.stringify({ t: lines.map((l) => `中:${l}`) }) });
+function fakeSend() {
+  const calls = [];
+  const send = async (payload) => {
+    calls.push(payload);
+    const { lines } = JSON.parse(payload.messages[1].content);
+    return reply(lines);
+  };
+  return { calls, send };
+}
+
+test('buildBatch takes following unique undone lines with preceding context', () => {
+  const s = ['a', 'b', 'c', 'b', 'd', 'e', 'f', 'g'];
+  const b = ai.buildBatch(s, 'd', (t) => t === 'e', []);
+  assert.deepEqual(b.lines, ['d', 'f', 'g']);
+  assert.deepEqual(b.context, ['a', 'b', 'c', 'b']);
+  assert.deepEqual(ai.buildBatch(s, 'b', () => false, []).lines, ['b', 'c', 'd', 'e', 'f', 'g']);
+});
+
+test('buildBatch for live captions sends one line with recent context', () => {
+  const b = ai.buildBatch([], 'x', () => false, ['1', '2', '3', '4', '5', '6']);
+  assert.deepEqual(b, { lines: ['x'], context: ['2', '3', '4', '5', '6'] });
+});
+
+test('parseBatchReply strips fences and checks count', () => {
+  assert.deepEqual(ai.parseBatchReply('```json\n{"t":["甲","乙"]}\n```', 2), ['甲', '乙']);
+  assert.throws(() => ai.parseBatchReply('{"t":["甲"]}', 2));
+  assert.throws(() => ai.parseBatchReply('not json', 1));
+});
+
+test('one batch request serves following sentences', async () => {
+  const { calls, send } = fakeSend();
+  const t = ai.createAiTranslator({ tier: 'aiFree', getSentences: () => ['a', 'b', 'c'], send });
+  assert.equal(await t.translate('a', {}), '中:a');
+  assert.equal(await t.translate('c', {}), '中:c');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].type, 'bce-ai');
+  assert.equal(calls[0].tier, 'aiFree');
+});
+
+test('failure rejects with code from background', async () => {
+  const t = ai.createAiTranslator({ tier: 'aiFree', getSentences: () => [], send: async () => ({ ok: false, error: 'http-429' }) });
+  await assert.rejects(t.translate('a', {}), (e) => e.code === 'http-429');
+  const bad = ai.createAiTranslator({ tier: 'aiFree', getSentences: () => [], send: async () => ({ ok: true, text: 'oops' }) });
+  await assert.rejects(bad.translate('a', {}), (e) => e.code === 'bad-reply');
+});
+
+test('abort rejects the caller but keeps batch results', async () => {
+  const { calls, send } = fakeSend();
+  const t = ai.createAiTranslator({ tier: 'aiPro', getSentences: () => ['a', 'b'], send });
+  const controller = new AbortController();
+  const pending = t.translate('a', { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(pending, (e) => e.name === 'AbortError');
+  assert.equal(await t.translate('b', {}), '中:b');
+  assert.equal(calls.length, 1);
+});
+
+test('translate after destroy rejects with AbortError', async () => {
+  const { calls, send } = fakeSend();
+  const t = ai.createAiTranslator({ tier: 'aiFree', getSentences: () => ['a'], send });
+  assert.equal(await t.translate('a', {}), '中:a');
+  t.destroy();
+  await assert.rejects(t.translate('a', {}), (e) => e.name === 'AbortError');
+  assert.equal(calls.length, 1);
+});
