@@ -546,6 +546,7 @@
         imported = [];
         importedSource = '';
         advanceSeconds = 0;
+        guardedVideo = nextId ?? undefined;
       }
       toggle.remove();
       overlay.remove();
@@ -1079,15 +1080,54 @@
     }
   }
 
+  const ccButton = () => document.querySelector('#movie_player .ytp-subtitles-button');
+  const ccUsable = (cc) => cc && !cc.disabled && cc.getAttribute('aria-disabled') !== 'true';
+  const ccPressed = (cc) => cc?.getAttribute('aria-pressed') === 'true';
+  // YouTube switches its own captions on by itself (an English video under a
+  // Chinese interface counts as "recommended") and carries the CC button over
+  // to later videos. While bilingual captions are off, every video starts with
+  // CC off; once the user turns captions on themselves (the CC button, the
+  // settings menu or the C key), that video is left alone.
+  const CC_GUARD_PAUSE_MS = 500;
+  let guardedVideo;
+  let ccGuardPausedUntil = 0;
+
+  function guardNativeCc() {
+    if (!guardedVideo || job || guardedVideo !== idFromUrl()) return;
+    const now = performance.now();
+    if (now < ccGuardPausedUntil) return;
+    const cc = ccButton();
+    if (!ccUsable(cc) || !ccPressed(cc)) return;
+    cc.click();
+    // Give the button time to update before looking again.
+    ccGuardPausedUntil = now + CC_GUARD_PAUSE_MS;
+  }
+
+  function releaseCcGuard() {
+    guardedVideo = undefined;
+  }
+
+  document.addEventListener('click', (event) => {
+    if (event.isTrusted && event.target instanceof Element
+      && event.target.closest('.ytp-subtitles-button, .ytp-settings-menu')) releaseCcGuard();
+  }, true);
+  window.addEventListener('keydown', (event) => {
+    if (!event.isTrusted || event.code !== 'KeyC' || event.altKey || event.ctrlKey || event.metaKey) return;
+    const target = event.composedPath()[0];
+    if (target instanceof Element && (target.isContentEditable || target.closest('input, textarea, select'))) return;
+    releaseCcGuard();
+  }, true);
+
   function enableNativeCaptions() {
     const cc = player.querySelector('.ytp-subtitles-button');
-    if (!cc || cc.disabled || cc.getAttribute('aria-disabled') === 'true'
-      || cc.getAttribute('aria-pressed') === null || cc.getClientRects().length === 0) return false;
+    if (!ccUsable(cc) || cc.getAttribute('aria-pressed') === null || cc.getClientRects().length === 0) return false;
     if (cc.getAttribute('aria-pressed') === 'false') {
       cc.click();
       const id = videoId;
+      // After a switch to another video the guard turns CC off there.
       restoreCc = () => {
-        if (idFromUrl() === id && cc.isConnected && cc.getAttribute('aria-pressed') === 'true') cc.click();
+        const current = ccButton();
+        if (idFromUrl() === id && ccPressed(current)) current.click();
       };
     }
     return true;
@@ -1197,6 +1237,7 @@
   // A short poll catches caption mutations and controls replaced by YouTube.
   const timer = setInterval(() => {
     syncPage();
+    guardNativeCc();
     refresh();
   }, 75);
 
