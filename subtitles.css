@@ -21,7 +21,11 @@
   transition: opacity 0.1s ease;
 }
 
-#movie_player .bce-toggle svg { display: block; pointer-events: none; }
+#movie_player .bce-toggle-label {
+  font: 700 13px/1 Arial, sans-serif;
+  pointer-events: none;
+}
+
 #movie_player .bce-toggle:hover { opacity: 1; }
 #movie_player .bce-toggle[aria-pressed="true"] { opacity: 1; }
 
@@ -104,6 +108,26 @@
   margin-top: 1px;
   min-height: 1.3em;
   color: #dbe5f0;
+}
+
+/* 「翻譯中…」while the translation is on its way. It waits a moment before
+   showing, so a fast built-in translation does not flash it. */
+.bce-translation.bce-pending {
+  -webkit-user-select: none;
+  user-select: none;
+  animation:
+    bce-pending-in 0.2s ease 0.3s both,
+    bce-pending-pulse 1.4s ease-in-out 0.5s infinite;
+}
+
+@keyframes bce-pending-in {
+  from { opacity: 0; }
+  to { opacity: 0.55; }
+}
+
+@keyframes bce-pending-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 0.3; }
 }
 
 /* Words can be hovered, clicked (copies the word) and drag-selected (copies
@@ -263,6 +287,17 @@
   text-overflow: ellipsis;
 }
 
+.bce-menu-item[data-key="tier"] .bce-menu-value {
+  padding-block: 4px;
+  text-align: right;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.bce-menu-item[role="menuitemradio"] .bce-menu-label {
+  overflow-wrap: anywhere;
+}
+
 .bce-menu-next, .bce-menu-prev {
   flex: none;
   font-size: 20px;
@@ -373,6 +408,9 @@
   }
   .bce-card .bce-word.bce-flash {
     animation: none;
+  }
+  .bce-translation.bce-pending {
+    animation: bce-pending-in 0s linear 0.3s both;
   }
 }
 

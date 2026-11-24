@@ -3,32 +3,54 @@
 importScripts('settings.js');
 
 const {
-  SETTINGS_KEY, KEYS_KEY, REQUEST_TIMEOUT_MS, mergeSettings, buildChatRequest, httpErrorCode, fetchErrorCode,
+  SETTINGS_KEY, KEYS_KEY, REQUEST_TIMEOUT_MS, mergeSettings, buildChatRequest, httpErrorCode,
+  fetchWithRetry, fetchErrorCode,
 } = globalThis.bceSettings;
+
+async function loadLocalKeys() {
+  const keys = {};
+  try {
+    const response = await fetch(chrome.runtime.getURL('.env'), { cache: 'no-store' });
+    if (!response.ok) return keys;
+    for (const line of (await response.text()).split(/\r?\n/)) {
+      const entry = line.trim().match(/^OPENROUTER_API_KEY\s*=\s*(?:"([^"\s]+)"|'([^'\s]+)'|([^\s"'#]+))(?:\s+#.*)?$/);
+      if (entry) keys.openrouter = entry[1] ?? entry[2] ?? entry[3];
+    }
+  } catch {
+    // The local file is optional for installations configured through the options page.
+  }
+  return keys;
+}
 
 async function handleAi({ tier, messages }) {
   const stored = await chrome.storage.local.get([SETTINGS_KEY, KEYS_KEY]);
   const settings = mergeSettings(stored[SETTINGS_KEY]);
-  const req = buildChatRequest(settings, stored[KEYS_KEY], tier, messages);
+  const keys = { ...stored[KEYS_KEY], ...await loadLocalKeys() };
+  const req = buildChatRequest(settings, keys, tier, messages);
   if (req.error) return { ok: false, error: req.error };
 
+  // One deadline covers the retries too; a pause cut short by it ends in a
+  // fetch that fails at once with the timeout.
+  const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const wait = (ms) => new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
   let res;
   try {
-    res = await fetch(req.url, { ...req.init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    res = await fetchWithRetry(() => fetch(req.url, { ...req.init, signal }), { wait });
   } catch (error) {
     return { ok: false, error: fetchErrorCode(error) };
   }
   if (!res.ok) {
-    // The provider's error text helps tell a quota from a bad model name; it
-    // never holds the key or the request body.
-    let detail = '';
-    try {
-      detail = (await res.text()).slice(0, 200);
-    } catch {
-      // no body
-    }
-    console.warn('[bce] AI 請求失敗：', res.status, detail);
-    return { ok: false, error: httpErrorCode(res.status) };
+    // Only the provider's error fields are read; they never hold the key.
+    const body = res.status === 402 ? await res.json().catch(() => undefined) : undefined;
+    const error = httpErrorCode(res.status, body, { retryAfter: res.headers.has('Retry-After') });
+    console.warn('[bce] AI 請求失敗：', res.status, error);
+    return { ok: false, error };
   }
 
   try {

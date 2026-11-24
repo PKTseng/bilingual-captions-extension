@@ -14,7 +14,7 @@ YouTube 英／繁中雙字幕的 Chrome MV3 擴充功能，無打包工具、無
 | `settings.js` | content script、背景程式（`importScripts`）、設定頁 | 翻譯等級與模型的預設值、合併儲存值（`mergeSettings`）、組 chat completions 請求（純函式） | `globalThis.bceSettings` |
 | `ai-translator.js` | content script | 分批 AI 翻譯器，介面同內建 `Translator`（`translate`／`destroy`，另有 `kind: 'ai'`），經注入的 `send` 交給背景程式 | `globalThis.bceAiTranslator` |
 | `content.js` | content script | 主程式：UI、字幕渲染、`job` 狀態機、翻譯（依等級建立翻譯器、AI 失敗退回內建）、事件綁定 | 無（最後載入） |
-| `background.js` | service worker | 讀 API key、代為呼叫 OpenRouter／Gemini | 只透過 `chrome.runtime` 訊息溝通 |
+| `background.js` | service worker | 讀 API key（設定頁或本機 `.env`）、代為呼叫 OpenRouter | 只透過 `chrome.runtime` 訊息溝通 |
 | `options.html`／`options.js` | 擴充功能選項頁 | 編輯預設等級、模型與 API key | 無 |
 | `subtitles.css` | content script | 所有樣式，class 前綴 `bce-` | |
 

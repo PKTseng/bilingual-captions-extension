@@ -2,59 +2,60 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>雙語字幕設定</title>
-  <style>
-    body { font: 14px/1.6 system-ui, sans-serif; max-width: 560px; margin: 24px auto; padding: 0 16px; }
-    fieldset { margin: 0 0 16px; padding: 12px 16px; }
-    label { display: block; margin: 6px 0; }
-    input[type="password"], input[type="text"] { width: 100%; box-sizing: border-box; }
-    .row { display: flex; gap: 8px; align-items: center; }
-    .row input[type="text"] { flex: 1; }
-    .result { margin-left: 8px; color: #555; }
-  </style>
+  <link rel="stylesheet" href="options.css">
 </head>
 <body>
-  <h1>雙語字幕設定</h1>
+  <main class="settings">
+    <header class="page-header">
+      <img src="icons/icon-128.png" alt="" width="52" height="52">
+      <div>
+        <h1>雙語字幕設定</h1>
+        <p>管理 YouTube 字幕的翻譯等級與 AI 模型。</p>
+      </div>
+    </header>
 
-  <fieldset>
-    <legend>預設翻譯等級</legend>
-    <div id="tiers"></div>
-  </fieldset>
+    <fieldset class="card">
+      <legend>預設翻譯等級</legend>
+      <div id="tiers" class="tier-options"></div>
+    </fieldset>
 
-  <fieldset>
-    <legend>API key</legend>
-    <label>OpenRouter key
-      <input type="password" id="key-openrouter" autocomplete="off">
-    </label>
-    <label>Gemini key
-      <input type="password" id="key-gemini" autocomplete="off">
-    </label>
-  </fieldset>
+    <fieldset class="card" id="ai">
+      <legend>AI 翻譯（OpenRouter）</legend>
+      <div class="fields">
+        <label>模型 ID
+          <input type="text" class="model" aria-label="AI 模型 ID" placeholder="例如 deepseek/deepseek-v4.1-flash" spellcheck="false">
+        </label>
+      </div>
+      <button type="button" class="test">測試翻譯</button>
+      <span class="result" role="status"></span>
+    </fieldset>
 
-  <fieldset id="aiFree">
-    <legend>AI 免費</legend>
-    <div class="row">
-      <select class="provider"></select>
-      <input type="text" class="model" placeholder="模型名稱">
-      <button type="button" class="test">測試</button>
-    </div>
-    <span class="result"></span>
-  </fieldset>
+    <fieldset class="card">
+      <legend>播放器模型選單</legend>
+      <p>勾選要顯示的內建模型。取消勾選後，目前的翻譯設定仍會保留。</p>
+      <div id="menu-models" class="columns"></div>
+    </fieldset>
 
-  <fieldset id="aiPro">
-    <legend>AI 進階</legend>
-    <div class="row">
-      <select class="provider"></select>
-      <input type="text" class="model" placeholder="模型名稱">
-      <button type="button" class="test">測試</button>
-    </div>
-    <span class="result"></span>
-  </fieldset>
+    <fieldset class="card">
+      <legend>API 金鑰</legend>
+      <p id="key-help">本機 <code>.env</code> 有填金鑰時會優先使用，欄位可留空。</p>
+      <div class="columns fields">
+        <label>OpenRouter
+          <input type="password" id="key-openrouter" autocomplete="off" aria-describedby="key-help">
+        </label>
+      </div>
+    </fieldset>
 
-  <button type="button" id="save">儲存</button>
-  <span id="status"></span>
+    <footer class="actions">
+      <span id="status" role="status"></span>
+      <button type="button" id="save">儲存設定</button>
+    </footer>
+  </main>
 
   <script src="settings.js"></script>
+  <script src="ai-translator.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

@@ -12,13 +12,17 @@
   const { sentenceCues, readTranscript, openTranscript } = globalThis.bceTranscript;
   const { requestTimedText, cachedTimedText } = globalThis.bcePageBridge;
   const {
-    TIERS, TIER_LABELS, SETTINGS_KEY, mergeSettings, describeTier,
+    TIER_LABELS, SETTINGS_KEY, KEYS_KEY, mergeSettings, describeTier, describeModel, describeAiError,
+    modelMenuKey, listTranslationModels,
   } = globalThis.bceSettings;
   const { createAiTranslator, CONTEXT_SIZE } = globalThis.bceAiTranslator;
   const PASSING_NOTICE_MS = 6000;
   let tier = 'basic';
   // Only the tier and model names are read here (SETTINGS_KEY), never API keys.
   let settings = mergeSettings();
+  // Until the page reloads or the keys change: an exhausted balance (402)
+  // covers every model of that provider.
+  const creditLimitedProviders = new Set();
   let videoId;
   let player;
   let job;
@@ -37,29 +41,13 @@
     return item;
   }
 
-  // Built with createElementNS because YouTube enforces Trusted Types.
-  function svgElement(tag, attributes) {
-    const item = document.createElementNS('http://www.w3.org/2000/svg', tag);
-    for (const [name, value] of Object.entries(attributes)) item.setAttribute(name, value);
-    return item;
-  }
   const toggle = element('button', 'bce-toggle');
   toggle.type = 'button';
   toggle.title = '雙語字幕選單';
   toggle.setAttribute('aria-label', '雙語字幕選單');
-  const toggleIcon = svgElement('svg', {
-    viewBox: '0 0 24 24', width: '24', height: '24', fill: 'none', stroke: 'currentColor',
-    'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true',
-  });
-  // Tabler Icons Subtitles, MIT (icons/LICENSE-tabler.txt).
-  toggleIcon.append(
-    svgElement('path', { d: 'M18 5a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3l12 0' }),
-    svgElement('path', { d: 'M7 15h5' }),
-    svgElement('path', { d: 'M15 15h2' }),
-    svgElement('path', { d: 'M17 12h-3' }),
-    svgElement('path', { d: 'M11 12h-1' }),
-  );
-  toggle.append(toggleIcon);
+  const toggleLabel = element('span', 'bce-toggle-label', 'Dual');
+  toggleLabel.lang = 'en';
+  toggle.append(toggleLabel);
   const overlay = element('div', 'bce-overlay');
   const card = element('div', 'bce-card');
   const original = element('div', 'bce-line bce-original');
@@ -120,9 +108,20 @@
 
   const hasTiming = () => Boolean(job?.cues.length || imported.length);
 
+  function aiModelKey(name, config = settings[name]) {
+    return config && `${config.provider}/${config.model}`;
+  }
+
+  // 'credits' when this AI model is known not to answer now.
+  function usageLimit(name, config = settings[name]) {
+    return config && creditLimitedProviders.has(config.provider) ? 'credits' : undefined;
+  }
+
   function tierValue() {
-    if (!job?.fellBack || tier === 'basic') return describeTier(settings, tier);
-    return job.fellBack === 'english' ? '僅英文（AI 已暫停）' : '基本（AI 已暫停）';
+    const selected = describeTier(settings, tier);
+    if (!job?.fellBack || tier === 'basic') return selected;
+    const status = job.fellBack === 'english' ? '僅顯示英文' : '改用 Chrome 內建';
+    return `${selected}\n${describeAiError(job.fallbackCode)}，${status}`;
   }
 
   function timingValue() {
@@ -194,13 +193,23 @@
   // The switch itself happens in onSettingsChanged, so the options page and
   // other tabs follow the same tier; chooseTier retries an AI tier that fell back.
   function tierPage() {
+    const choices = [{ tier: 'basic' }, ...listTranslationModels(settings)];
     return [
       backItem('翻譯'),
-      ...TIERS.map((name) => {
-        const item = menuItem(`tier-${name}`, describeTier(settings, name), () => {
-          void chooseTier(name);
+      ...choices.map(({ tier: name, provider, model }) => {
+        const config = name === 'basic' ? undefined : { provider, model };
+        const key = config ? modelMenuKey(name, config) : 'tier-basic';
+        const label = config ? describeModel(name, config) : describeTier(settings, name);
+        const modelKey = aiModelKey(name, config);
+        const limit = usageLimit(name, config);
+        const item = menuItem(key, label, () => {
+          void chooseTier(name, config);
           showMenuPage('main');
-        }, { role: 'menuitemradio', checked: tier === name });
+        }, {
+          role: 'menuitemradio', checked: tier === name && modelKey === aiModelKey(name),
+          disabled: Boolean(limit),
+          value: limit ? '餘額不足' : undefined,
+        });
         item.prepend(glyph('bce-menu-check'));
         return item;
       }),
@@ -231,7 +240,9 @@
       : menuPage === 'timing' ? timingPage() : mainPage()));
     const key = preferKey ?? focused;
     if (focused !== undefined) {
-      (menu.querySelector(`[data-key="${key}"]:not(:disabled)`) ?? firstMenuItem())?.focus();
+      const selected = Array.from(menu.querySelectorAll('button:not(:disabled)'))
+        .find((item) => item.dataset.key === key);
+      (selected ?? firstMenuItem())?.focus();
     }
     placeMenu();
   }
@@ -480,6 +491,19 @@
     ? new URLSearchParams(location.search).get('v')
     : null;
 
+  function onCaptionShortcut(event) {
+    if (event.code !== 'KeyC' || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
+      || event.isComposing || event.defaultPrevented || !player || !idFromUrl()) return;
+
+    const target = event.composedPath()[0];
+    if (target instanceof Element && (target.isContentEditable || target.closest('input, textarea, select'))) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    // Start within the key press so Chrome can download the translation model.
+    if (!event.repeat) void begin();
+  }
+
   // Subtitles sit near the bottom of the video, and move up to clear the
   // progress bar and controls (with a small gap) while YouTube shows them.
   const CONTROLS_GAP = 12;
@@ -601,7 +625,8 @@
   }
 
   function reveal(line) {
-    if (reduceMotion.matches || !line.textContent) return;
+    // The placeholder has its own delayed fade-in (subtitles.css).
+    if (reduceMotion.matches || !line.textContent || line.classList.contains('bce-pending')) return;
     line.animate([
       { opacity: 0, transform: 'translateY(0.3em)' },
       { opacity: 1, transform: 'none' },
@@ -615,18 +640,23 @@
     }
   }
 
+  // `undefined` means not translated yet: a placeholder stands in while a
+  // translator is (or is about to be) at work, but not once only English is left.
   function setTranslation(result) {
     translation.textContent = '';
-    appendWords(translation, result, chineseWords);
+    const pending = result === undefined && Boolean(job) && job.fellBack !== 'english';
+    translation.classList.toggle('bce-pending', pending);
+    if (pending) translation.textContent = '翻譯中…';
+    else appendWords(translation, result ?? '', chineseWords);
   }
 
   function showTranslation(result) {
-    if (held || translation.textContent === result) return;
+    if (held || (translation.textContent === result && !translation.classList.contains('bce-pending'))) return;
     resizeSmoothly(() => setTranslation(result));
     reveal(translation);
   }
 
-  function renderCaption(text, result = '', cue) {
+  function renderCaption(text, result, cue) {
     if (held) return;
     if (!text) {
       // Fade out and keep the last sentence on the card while it fades.
@@ -844,7 +874,8 @@
   async function translateCaption(active, text) {
     const controller = new AbortController();
     const translator = active.translator;
-    active.inFlight = { text, controller };
+    const inFlight = { text, controller };
+    active.inFlight = inFlight;
     try {
       const result = await translator.translate(text, { signal: controller.signal });
       if (job !== active || controller.signal.aborted || idFromUrl() !== videoId) return;
@@ -863,7 +894,7 @@
       stop(false);
       setNotice('翻譯中斷，請在雙語字幕選單重新開啟。');
     } finally {
-      active.inFlight = undefined;
+      if (active.inFlight === inFlight) active.inFlight = undefined;
       if (job === active) refresh();
     }
   }
@@ -927,13 +958,18 @@
   async function fallBack(active, error) {
     console.warn('[bce] AI 翻譯失敗：', error?.code ?? error);
     cache.clear();
+    const code = error?.code;
+    if (code === 'credits' && settings[tier]) creditLimitedProviders.add(settings[tier].provider);
     active.fellBack = 'basic';
+    active.fallbackCode = code;
     updateMenu();
-    const text = error?.code === 'no-key'
-      ? '請先在設定頁填入 OpenRouter／Gemini 的 API key，已改用內建翻譯。'
-      : error?.code === 'bad-key'
-        ? 'API key 無效或沒有權限，已改用內建翻譯。請到設定頁檢查。'
-        : 'AI 暫時無法使用，已改用內建翻譯。';
+    const notices = {
+      credits: 'AI 帳戶餘額不足，已改用 Chrome 內建翻譯。加值後重新整理頁面即可再用。',
+      'rate-limit': 'AI 服務目前限制請求，已改用 Chrome 內建翻譯。',
+      'no-key': '請先在設定頁填入 OpenRouter 的 API key，已改用內建翻譯。',
+      'bad-key': 'API key 無效或沒有權限，已改用內建翻譯。請到設定頁檢查。',
+    };
+    const text = notices[code] ?? `${describeAiError(code)}，已改用內建翻譯。`;
     setNotice(text);
     try {
       if (!(await installTranslator(active, 'basic'))) return;
@@ -942,8 +978,11 @@
     } catch {
       // installTranslator left the job without a translator: English only.
       active.fellBack = 'english';
+      if (job === active && translation.classList.contains('bce-pending')) setTranslation('');
       updateMenu();
-      setPassingNotice(globalThis.Translator
+      setPassingNotice(code === 'credits'
+        ? 'AI 帳戶餘額不足，Chrome 內建翻譯也無法啟動，暫時只顯示英文字幕。'
+        : globalThis.Translator
         ? 'AI 暫時無法使用，內建翻譯也無法啟動。請在選單把翻譯切到「基本」，再重新開啟雙語字幕下載語言模型。'
         : 'AI 暫時無法使用，這個 Chrome 環境也無法使用內建翻譯。');
     }
@@ -952,10 +991,18 @@
   async function switchTier(next) {
     tier = next;
     cache.clear();
-    if (job) job.fellBack = undefined;
+    if (job) {
+      job.fellBack = undefined;
+      job.fallbackCode = undefined;
+    }
     updateMenu();
     const active = job;
     if (!active) return;
+    const limit = usageLimit(next);
+    if (limit) {
+      await fallBack(active, { code: limit });
+      return;
+    }
     if (next === 'basic' && !globalThis.Translator) {
       stop(false);
       setNotice('這個 Chrome 環境無法使用內建翻譯。');
@@ -971,25 +1018,34 @@
     }
   }
 
-  async function chooseTier(next) {
+  async function chooseTier(next, config) {
+    const nextModel = aiModelKey(next, config);
+    if (usageLimit(next, config)) return;
     // Storage would not change, so retry the AI tier here.
-    if (next === tier && tier !== 'basic' && job?.fellBack) {
+    if (next === tier && nextModel === aiModelKey(tier) && job?.fellBack) {
       void switchTier(next);
       return;
     }
     try {
       const stored = await chrome.storage.local.get(SETTINGS_KEY);
-      await chrome.storage.local.set({ [SETTINGS_KEY]: { ...mergeSettings(stored[SETTINGS_KEY]), tier: next } });
+      const updated = { ...mergeSettings(stored[SETTINGS_KEY]), tier: next };
+      if (config) updated[next] = config;
+      await chrome.storage.local.set({ [SETTINGS_KEY]: updated });
     } catch {
       setNotice('無法儲存翻譯等級，請重新整理頁面。');
     }
   }
 
   function onSettingsChanged(changes, areaName) {
-    if (retired || areaName !== 'local' || !changes[SETTINGS_KEY]) return;
-    settings = mergeSettings(changes[SETTINGS_KEY].newValue);
-    if (settings.tier !== tier) void switchTier(settings.tier);
-    else updateMenu();
+    if (retired || areaName !== 'local' || (!changes[SETTINGS_KEY] && !changes[KEYS_KEY])) return;
+    const previousModel = aiModelKey(tier);
+    if (changes[KEYS_KEY]) creditLimitedProviders.clear();
+    if (changes[SETTINGS_KEY]) settings = mergeSettings(changes[SETTINGS_KEY].newValue);
+    if (settings.tier !== tier || previousModel !== aiModelKey(tier) || (previousModel && changes[KEYS_KEY])) {
+      void switchTier(settings.tier);
+    } else {
+      updateMenu();
+    }
   }
 
   async function loadTier() {
@@ -1060,11 +1116,18 @@
     };
     job = active;
     updateToggle();
-    setNotice(tier === 'basic' ? '正在準備 Chrome 內建翻譯…' : `正在準備 AI 翻譯（${TIER_LABELS[tier]}）…`);
+    const limit = usageLimit(tier);
+    if (!limit) {
+      setNotice(tier === 'basic' ? '正在準備 Chrome 內建翻譯…' : `正在準備 AI 翻譯（${TIER_LABELS[tier]}）…`);
+    }
     player.classList.add('bce-replaces-native');
     if (fetchingTimed) void loadTimedText(active);
     refresh();
 
+    if (limit) {
+      await fallBack(active, { code: limit });
+      return;
+    }
     try {
       if (!(await installTranslator(active, tier))) return;
       setNotice(active.cues.length
@@ -1108,6 +1171,7 @@
   document.addEventListener('yt-navigate-finish', syncPage);
   document.addEventListener('loadedmetadata', syncPage, true);
   document.addEventListener('seeking', resetPosition, true);
+  window.addEventListener('keydown', onCaptionShortcut, true);
   chrome.storage.onChanged.addListener(onSettingsChanged);
   // A short poll catches caption mutations and controls replaced by YouTube.
   const timer = setInterval(() => {
@@ -1121,6 +1185,7 @@
   document.addEventListener('bce-takeover', () => {
     retired = true;
     clearInterval(timer);
+    window.removeEventListener('keydown', onCaptionShortcut, true);
     try {
       chrome.storage.onChanged.removeListener(onSettingsChanged);
     } catch {

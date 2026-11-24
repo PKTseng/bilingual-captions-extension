@@ -47,8 +47,8 @@
     const end = text.lastIndexOf('}');
     if (start === -1 || end < start) throw new Error('reply has no JSON object');
     const t = JSON.parse(text.slice(start, end + 1)).t;
-    if (!Array.isArray(t) || t.length !== count || !t.every((x) => typeof x === 'string')) {
-      throw new Error(`reply must hold ${count} strings`);
+    if (!Array.isArray(t) || t.length !== count || !t.every((x) => typeof x === 'string' && x.trim())) {
+      throw new Error(`reply must hold ${count} nonempty translations`);
     }
     return t;
   }

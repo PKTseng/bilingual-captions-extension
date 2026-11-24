@@ -4,7 +4,7 @@
   "version": "0.8.0",
   "description": "在 YouTube 顯示英文和繁體中文雙字幕，可選 Chrome 內建翻譯或 AI 翻譯。",
   "permissions": ["storage"],
-  "host_permissions": ["https://openrouter.ai/*", "https://generativelanguage.googleapis.com/*"],
+  "host_permissions": ["https://openrouter.ai/*"],
   "background": { "service_worker": "background.js" },
   "options_page": "options.html",
   "icons": {

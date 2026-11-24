@@ -6,17 +6,25 @@
 
   const SETTINGS_KEY = 'bceSettings';
   const KEYS_KEY = 'bceKeys';
-  const TIERS = ['basic', 'aiFree', 'aiPro'];
-  const TIER_LABELS = { basic: '基本', aiFree: 'AI 免費', aiPro: 'AI 進階' };
+  const TIERS = ['basic', 'ai'];
+  const TIER_LABELS = { basic: '基本', ai: 'AI' };
+  // Settings saved before the single AI tier existed.
+  const LEGACY_AI_TIERS = ['aiFree', 'aiPro'];
   const PROVIDERS = {
     openrouter: { label: 'OpenRouter', url: 'https://openrouter.ai/api/v1/chat/completions' },
-    gemini: { label: 'Gemini', url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions' },
   };
   const DEFAULT_SETTINGS = {
     tier: 'basic',
-    aiFree: { provider: 'gemini', model: 'gemini-3.8-flash' },
-    aiPro: { provider: 'openrouter', model: 'anthropic/claude-sonnet-5.5' },
+    ai: { provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash' },
+    hiddenModels: [],
   };
+  const MODEL_CATALOG = [
+    { tier: 'ai', ...DEFAULT_SETTINGS.ai },
+    { tier: 'ai', provider: 'openrouter', model: 'qwen/qwen3.7-flash' },
+    { tier: 'ai', provider: 'openrouter', model: 'anthropic/claude-sonnet-5.5' },
+  ];
+
+  const modelMenuKey = (tier, config) => `${tier}/${config.provider}/${config.model}`;
 
   function mergeTier(stored, defaults) {
     const base = { ...defaults };
@@ -29,14 +37,24 @@
   function mergeSettings(stored) {
     const src = stored && typeof stored === 'object' ? stored : {};
     return {
-      tier: TIERS.includes(src.tier) ? src.tier : 'basic',
-      aiFree: mergeTier(src.aiFree, DEFAULT_SETTINGS.aiFree),
-      aiPro: mergeTier(src.aiPro, DEFAULT_SETTINGS.aiPro),
+      tier: TIERS.includes(src.tier) ? src.tier : LEGACY_AI_TIERS.includes(src.tier) ? 'ai' : 'basic',
+      // Old AI tier models are not carried over: the AI tier starts on its default.
+      ai: mergeTier(src.ai, DEFAULT_SETTINGS.ai),
+      hiddenModels: Array.isArray(src.hiddenModels)
+        ? [...new Set(src.hiddenModels.filter((key) => typeof key === 'string'))] : [],
     };
   }
 
+  function listTranslationModels(settings) {
+    const custom = [{ tier: 'ai', ...settings.ai }]
+      .filter(({ tier, provider, model }) => !MODEL_CATALOG.some((entry) =>
+        entry.tier === tier && entry.provider === provider && entry.model === model));
+    return [...MODEL_CATALOG, ...custom]
+      .filter((entry) => !settings.hiddenModels.includes(modelMenuKey(entry.tier, entry)));
+  }
+
   function buildChatRequest(settings, keys, tier, messages) {
-    if (tier !== 'aiFree' && tier !== 'aiPro') return { error: 'bad-tier' };
+    if (tier !== 'ai') return { error: 'bad-tier' };
     const { provider, model } = settings[tier];
     const key = String((keys && keys[provider]) ?? '').trim();
     if (!key) return { error: 'no-key' };
@@ -54,8 +72,54 @@
   // still alive to answer.
   const REQUEST_TIMEOUT_MS = 25000;
 
-  function httpErrorCode(status) {
+  // OpenRouter answers 402 when the balance cannot cover the request; a 402
+  // about in-flight requests (sent with Retry-After) passes once they settle.
+  function httpErrorCode(status, body, { retryAfter = false } = {}) {
+    if (status === 402) {
+      const metadata = body?.error?.metadata;
+      const transient = retryAfter || metadata?.error_type === 'in_flight_budget_exhausted'
+        || metadata?.limit_source === 'openrouter_in_flight_budget';
+      return transient ? 'rate-limit' : 'credits';
+    }
+    if (status === 429) return 'rate-limit';
     return status === 401 || status === 403 ? 'bad-key' : `http-${status}`;
+  }
+
+  const AI_ERROR_REASONS = {
+    credits: 'AI 帳戶餘額不足',
+    'rate-limit': 'AI 服務限制請求',
+    'no-key': '尚未設定 API key',
+    'bad-key': 'API key 無效或沒有權限',
+    'bad-reply': 'AI 未回傳可用譯文',
+    timeout: 'AI 回應逾時',
+    network: '無法連線到 AI 服務',
+    // An orphaned content script after the extension was reloaded.
+    'send-failed': '擴充功能已更新，請重新整理頁面',
+    'http-404': '找不到這個模型',
+  };
+
+  // Short reason for the fallback, shown in the menu and in notices.
+  function describeAiError(code) {
+    if (Object.hasOwn(AI_ERROR_REASONS, code)) return AI_ERROR_REASONS[code];
+    const status = /^http-(\d+)$/.exec(code ?? '')?.[1];
+    if (!status) return 'AI 暫時無法使用';
+    if (status === '400') return 'AI 服務拒絕請求（HTTP 400，可能是模型名稱錯誤）';
+    if (status.startsWith('5')) return `AI 服務暫時無法使用（HTTP ${status}）`;
+    return `AI 服務錯誤（HTTP ${status}）`;
+  }
+
+  // An overloaded provider (502/503/504) usually
+  // recovers within seconds, so those statuses are tried again after a pause.
+  const RETRY_DELAYS_MS = [1000, 3000];
+  const RETRY_STATUSES = new Set([502, 503, 504]);
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  async function fetchWithRetry(doFetch, { delays = RETRY_DELAYS_MS, wait = pause } = {}) {
+    for (let attempt = 0; ; attempt++) {
+      const res = await doFetch();
+      if (res.ok || !RETRY_STATUSES.has(res.status) || attempt >= delays.length) return res;
+      await wait(delays[attempt]);
+    }
   }
 
   function fetchErrorCode(error) {
@@ -66,15 +130,20 @@
 
   // Human-readable tier label; AI tiers append the model's short name.
   function describeTier(settings, tier) {
-    if (tier !== 'aiFree' && tier !== 'aiPro') return BASIC_LABEL;
-    const model = String(settings[tier].model);
+    if (tier !== 'ai') return BASIC_LABEL;
+    return describeModel(tier, settings[tier]);
+  }
+
+  function describeModel(tier, config) {
+    const model = config.model;
     const short = model.slice(model.lastIndexOf('/') + 1);
     return `${TIER_LABELS[tier]} · ${short}`;
   }
 
   const api = {
     SETTINGS_KEY, KEYS_KEY, TIERS, TIER_LABELS, PROVIDERS, DEFAULT_SETTINGS, REQUEST_TIMEOUT_MS,
-    mergeSettings, buildChatRequest, httpErrorCode, fetchErrorCode, describeTier,
+    MODEL_CATALOG, mergeSettings, modelMenuKey, listTranslationModels, buildChatRequest,
+    httpErrorCode, fetchWithRetry, fetchErrorCode, describeAiError, describeTier, describeModel,
   };
   globalThis.bceSettings = api;
   if (typeof module !== 'undefined') module.exports = api;
