@@ -9,6 +9,21 @@
   const FIRST_BATCH_SIZE = 8;
   const BATCH_SIZE = 20;
   const CONTEXT_SIZE = 5;
+  // A long video sends a hundred or more batches, so a single slow or
+  // malformed reply is expected sooner or later. Such failures are retried
+  // here (at most MAX_ATTEMPTS rounds per line) instead of ending AI
+  // translation for the rest of the video.
+  const MAX_ATTEMPTS = 3;
+  const RETRY_DELAYS_MS = [1500, 4000];
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // Failures that a later request can get past. The others (no key, bad key,
+  // no credits, unknown model, orphaned script) will fail the same way again.
+  function isTransientError(code) {
+    if (['timeout', 'network', 'rate-limit', 'bad-reply'].includes(code)) return true;
+    const status = /^http-(\d+)$/.exec(code ?? '')?.[1];
+    return status === '408' || Boolean(status?.startsWith('5'));
+  }
 
   const SYSTEM_PROMPT = [
     '你是影片字幕翻譯員。請把 lines 中的英文句子逐句翻成台灣用語的繁體中文。',
@@ -56,13 +71,13 @@
   const abortError = () => new DOMException('Translation aborted', 'AbortError');
   const codedError = (code, message) => Object.assign(new Error(message || code), { code });
 
-  function createAiTranslator({ tier, getSentences, send }) {
+  function createAiTranslator({ tier, getSentences, send, wait = pause }) {
     const results = new Map();
     const pending = new Map();
     let recent = [];
     let destroyed = false;
 
-    async function runBatch(lines, context) {
+    async function request(lines, context) {
       let res;
       try {
         res = await send({ type: 'bce-ai', tier, messages: buildMessages({ lines, context }) });
@@ -71,19 +86,46 @@
       }
       if (!res || typeof res.ok !== 'boolean') throw codedError('send-failed');
       if (!res.ok) throw codedError(res.error || 'send-failed');
-      let out;
       try {
-        out = parseBatchReply(res.text, lines.length);
+        return parseBatchReply(res.text, lines.length);
       } catch (err) {
         throw codedError('bad-reply', err.message);
+      }
+    }
+
+    // A reply with the wrong number of lines, or one too slow to finish, is
+    // usually down to the batch size, so those batches are split in halves;
+    // other transient failures are retried as they are after a pause.
+    async function runBatch(lines, context, attempt = 0) {
+      let out;
+      try {
+        out = await request(lines, context);
+      } catch (err) {
+        if (destroyed || !isTransientError(err.code) || attempt + 1 >= MAX_ATTEMPTS) throw err;
+        if (lines.length > 1 && (err.code === 'bad-reply' || err.code === 'timeout')) {
+          const half = Math.ceil(lines.length / 2);
+          const head = lines.slice(0, half);
+          await Promise.all([
+            runBatch(head, context, attempt + 1),
+            runBatch(lines.slice(half), [...context, ...head].slice(-CONTEXT_SIZE), attempt + 1),
+          ]);
+          return;
+        }
+        await wait(RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)]);
+        if (destroyed) throw abortError();
+        await runBatch(lines, context, attempt + 1);
+        return;
       }
       if (destroyed) return;
       lines.forEach((line, i) => results.set(line, out[i]));
     }
 
-    function startBatch(text) {
-      const done = (t) => results.has(t) || pending.has(t);
-      const { lines, context } = buildBatch(getSentences() || [], text, done, recent);
+    const done = (t) => results.has(t) || pending.has(t);
+
+    function startBatch(text, sentences = getSentences() || [], followUp = true) {
+      const at = sentences.indexOf(text);
+      const fresh = at !== -1 && !(at > 0 && done(sentences[at - 1]));
+      const { lines, context } = buildBatch(sentences, text, done, recent);
       const promise = runBatch(lines, context);
       const cleanup = () => {
         for (const line of lines) if (pending.get(line) === promise) pending.delete(line);
@@ -92,6 +134,13 @@
       // its only caller already aborted.
       promise.then(cleanup, cleanup);
       for (const line of lines) pending.set(line, promise);
+      // A fresh start or a seek has nothing translated ahead, so the next
+      // batch goes out alongside the small first one instead of after it;
+      // otherwise the lines after the first batch wait a whole round trip.
+      if (fresh && followUp) {
+        const next = sentences.slice(at + 1).find((s) => !done(s));
+        if (next !== undefined) startBatch(next, sentences, false);
+      }
       return promise;
     }
 
@@ -132,7 +181,10 @@
     return { kind: 'ai', translate, destroy };
   }
 
-  const api = { FIRST_BATCH_SIZE, BATCH_SIZE, CONTEXT_SIZE, buildBatch, buildMessages, parseBatchReply, createAiTranslator };
+  const api = {
+    FIRST_BATCH_SIZE, BATCH_SIZE, CONTEXT_SIZE, MAX_ATTEMPTS, isTransientError, buildBatch, buildMessages,
+    parseBatchReply, createAiTranslator,
+  };
   globalThis.bceAiTranslator = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

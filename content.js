@@ -15,8 +15,15 @@
     TIER_LABELS, SETTINGS_KEY, KEYS_KEY, mergeSettings, describeTier, describeModel, describeAiError,
     modelMenuKey, listTranslationModels,
   } = globalThis.bceSettings;
-  const { createAiTranslator, CONTEXT_SIZE } = globalThis.bceAiTranslator;
+  const { createAiTranslator, CONTEXT_SIZE, isTransientError } = globalThis.bceAiTranslator;
   const PASSING_NOTICE_MS = 6000;
+  // The translator already retried a failed batch; this many failures in a
+  // row (with a growing pause between them) still end in the fallback.
+  const AI_FAILURE_LIMIT = 3;
+  const AI_RETRY_PAUSE_MS = 4000;
+  // How far ahead lines are translated. AI batches take seconds and may be
+  // retried, so they start further ahead than the built-in translator.
+  const LOOKAHEAD = { basic: { seconds: 60, cues: 15 }, ai: { seconds: 150, cues: 60 } };
   let tier = 'basic';
   // Only the tier and model names are read here (SETTINGS_KEY), never API keys.
   let settings = mergeSettings();
@@ -809,7 +816,7 @@
       active.receivedCaption = true;
       setNotice('');
     }
-    if (!cache.has(sentence) && !active.inFlight) {
+    if (!cache.has(sentence) && !active.inFlight && now >= active.retryAt) {
       void translateCaption(active, sentence);
     }
   }
@@ -853,13 +860,14 @@
       active.receivedCaption = true;
       setNotice('');
     }
-    if (!active.translator || active.inFlight) return;
+    if (!active.translator || active.inFlight || now < active.retryAt) return;
     if (currentText && !cache.has(currentText)) {
       void translateCaption(active, currentText);
       return;
     }
-    const upcoming = cues.slice(index + 1, index + 16)
-      .find((cue) => cue.start - time <= 60 && !cache.has(cue.text));
+    const ahead = LOOKAHEAD[active.translator.kind === 'ai' ? 'ai' : 'basic'];
+    const upcoming = cues.slice(index + 1, index + 1 + ahead.cues)
+      .find((cue) => cue.start - time <= ahead.seconds && !cache.has(cue.text));
     if (upcoming) void translateCaption(active, upcoming.text);
   }
 
@@ -879,6 +887,7 @@
     try {
       const result = await translator.translate(text, { signal: controller.signal });
       if (job !== active || controller.signal.aborted || idFromUrl() !== videoId) return;
+      active.aiFailures = 0;
       if (cache.size >= 4000) cache.delete(cache.keys().next().value);
       cache.set(text, result);
       if (text === currentText || (!active.cues.length && text === active.live.shown)) {
@@ -888,6 +897,14 @@
       if (job !== active || controller.signal.aborted || error?.name === 'AbortError'
         || idFromUrl() !== videoId || translator !== active.translator) return;
       if (translator.kind === 'ai') {
+        // A passing failure (slow reply, rate limit, malformed batch) only
+        // skips ahead for a moment; the lines are asked for again after it.
+        active.aiFailures += 1;
+        if (isTransientError(error?.code) && active.aiFailures < AI_FAILURE_LIMIT) {
+          console.warn('[bce] AI 翻譯暫時失敗，稍後重試：', error.code);
+          active.retryAt = performance.now() + AI_RETRY_PAUSE_MS * active.aiFailures;
+          return;
+        }
         void fallBack(active, error);
         return;
       }
@@ -937,6 +954,8 @@
     active.inFlight?.controller.abort();
     active.translator?.destroy();
     active.translator = undefined;
+    active.aiFailures = 0;
+    active.retryAt = 0;
     const current = () => job === active && active.translatorRequest === request;
     try {
       const translator = await createTranslator(active, wanted);
@@ -1113,6 +1132,8 @@
       live: { raw: '', buffer: '', lastSeen: -Infinity },
       transcriptUntil: openingTranscript ? performance.now() + 2600 : 0,
       nextTranscriptCheck: 0,
+      aiFailures: 0,
+      retryAt: 0,
     };
     job = active;
     updateToggle();
