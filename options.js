@@ -8,6 +8,7 @@
   } = globalThis.bceSettings;
   const { createAiTranslator } = globalThis.bceAiTranslator;
   const { summarize, clearAll } = globalThis.bceTranslationStore;
+  const { USAGE_KEY, mergeUsage, describeMonth, formatCost } = globalThis.bceUsage;
   const AI_TIERS = ['ai'];
   const AI_PROVIDER = 'openrouter';
   const SAMPLE_CAPTIONS = ['Welcome back to the channel.', 'Today we are going to try something new.'];
@@ -49,6 +50,7 @@
     settings.glossary = $('#glossary').value;
     settings.fixAsr = $('#fix-asr').checked;
     settings.prefetchWhole = $('#prefetch-whole').checked;
+    settings.monthlyLimit = Number.parseFloat($('#monthly-limit').value) || 0;
     const keys = { openrouter: $('#key-openrouter').value.trim() };
     return { settings: mergeSettings(settings), keys };
   }
@@ -66,6 +68,8 @@
     $('#glossary').value = settings.glossary;
     $('#fix-asr').checked = settings.fixAsr;
     $('#prefetch-whole').checked = settings.prefetchWhole;
+    $('#monthly-limit').value = settings.monthlyLimit ? String(settings.monthlyLimit) : '';
+    void showUsage(settings.monthlyLimit);
     for (const [key, checkbox] of modelCheckboxes) checkbox.checked = !settings.hiddenModels.includes(key);
     displayedForm = readForm();
   }
@@ -96,7 +100,7 @@
       }
       settings.hiddenModels = [...hidden];
       // Only what was edited here; another tab may have changed the rest.
-      for (const key of ['glossary', 'fixAsr', 'prefetchWhole']) {
+      for (const key of ['glossary', 'fixAsr', 'prefetchWhole', 'monthlyLimit']) {
         if (draft.settings[key] !== displayed.settings[key]) settings[key] = draft.settings[key];
       }
       for (const provider of Object.keys(PROVIDERS)) {
@@ -136,12 +140,41 @@
     }
   }
 
+  // This month and the last month with use, against the saved limit.
+  let shownLimit = 0;
+  async function showUsage(limit = shownLimit) {
+    shownLimit = limit;
+    const summary = $('#usage-summary');
+    try {
+      const stored = await chrome.storage.local.get(USAGE_KEY);
+      const { current, previous } = mergeUsage(stored[USAGE_KEY]);
+      const lines = [`本月 · ${describeMonth(current)}`];
+      if (limit > 0) {
+        const left = Math.max(0, limit - current.cost);
+        lines.push(current.cost >= limit
+          ? `已達上限 ${formatCost(limit)}，AI 翻譯暫停中`
+          : `上限 ${formatCost(limit)}，還剩 ${formatCost(left)}`);
+      }
+      if (previous) lines.push(`上次使用 · ${describeMonth(previous)}`);
+      summary.replaceChildren(...lines.map((text, i) => {
+        const line = document.createElement('div');
+        line.textContent = text;
+        if (i === 1 && limit > 0 && current.cost >= limit) line.className = 'over';
+        return line;
+      }));
+    } catch {
+      summary.textContent = '無法讀取 AI 用量。';
+    }
+  }
+
   buildForm();
   const formReady = load();
   formReady.catch(() => { $('#status').textContent = '無法讀取設定，請重新開啟設定頁。'; });
   document.addEventListener('input', () => { dirty = true; });
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (!dirty && area === 'local' && (changes[SETTINGS_KEY] || changes[KEYS_KEY])) void load();
+    if (area !== 'local') return;
+    if (changes[USAGE_KEY]) void showUsage();
+    if (!dirty && (changes[SETTINGS_KEY] || changes[KEYS_KEY])) void load();
   });
 
   $('#save').addEventListener('click', async () => {

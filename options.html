@@ -57,6 +57,18 @@
       </div>
     </fieldset>
 
+    <fieldset class="card" id="usage">
+      <legend>AI 用量與每月上限</legend>
+      <p>依 OpenRouter 每次回報的費用累計，只算這個 Chrome 透過雙語字幕送出的請求，每月 1 日重新計算。實際帳單以 <a href="https://openrouter.ai/activity" target="_blank" rel="noopener">OpenRouter</a> 為準。</p>
+      <div id="usage-summary" class="usage-summary" role="status"></div>
+      <div class="fields limit">
+        <label>每月上限（美元）
+          <input type="number" id="monthly-limit" min="0" step="0.01" inputmode="decimal" placeholder="不限" aria-describedby="limit-help">
+        </label>
+      </div>
+      <p id="limit-help" class="hint">本月費用達到上限後，AI 翻譯會暫停並改用 Chrome 內建翻譯，下個月自動恢復。留空或填 0 代表不限。已送出的請求仍會完成，費用可能略超過上限。</p>
+    </fieldset>
+
     <fieldset class="card" id="saved">
       <legend>已存的 AI 譯文</legend>
       <p>看過的影片會保留 AI 譯文，重看時直接顯示，不會再收費。最多保留最近 300 部影片（每個模型分開計算）。</p>
@@ -73,6 +85,7 @@
   <script src="settings.js"></script>
   <script src="ai-translator.js"></script>
   <script src="translation-store.js"></script>
+  <script src="usage.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

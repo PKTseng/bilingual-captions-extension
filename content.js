@@ -60,6 +60,9 @@
   // Until the page reloads or the keys change: an exhausted balance (402)
   // covers every model of that provider.
   const creditLimitedProviders = new Set();
+  // This month's AI spending reached the limit set in the options (every
+  // model), until the limit is changed or the page reloads.
+  let budgetReached = false;
   let videoId;
   let player;
   let job;
@@ -165,9 +168,11 @@
     return config && `${config.provider}/${config.model}`;
   }
 
-  // 'credits' when this AI model is known not to answer now.
+  // 'credits' or 'budget' when this AI model is known not to answer now.
   function usageLimit(name, config = settings[name]) {
-    return config && creditLimitedProviders.has(config.provider) ? 'credits' : undefined;
+    if (!config) return undefined;
+    if (budgetReached) return 'budget';
+    return creditLimitedProviders.has(config.provider) ? 'credits' : undefined;
   }
 
   const languageLabel = (code) => LANGUAGES[normalizeLanguage(code) ?? 'en'].label;
@@ -269,7 +274,7 @@
         }, {
           role: 'menuitemradio', checked: tier === name && modelKey === aiModelKey(name),
           disabled: Boolean(limit),
-          value: limit ? '餘額不足' : undefined,
+          value: limit === 'budget' ? '已達本月上限' : limit ? '餘額不足' : undefined,
         });
         item.prepend(glyph('bce-menu-check'));
         return item;
@@ -1421,12 +1426,14 @@
     cache.clear();
     const code = error?.code;
     if (code === 'credits' && settings[tier]) creditLimitedProviders.add(settings[tier].provider);
+    if (code === 'budget') budgetReached = true;
     active.fellBack = 'basic';
     active.fallbackCode = code;
     active.showingSelected = false;
     updateToggle();
     const notices = {
       credits: 'AI 帳戶餘額不足，已改用 Chrome 內建翻譯。加值後重新整理頁面即可再用。',
+      budget: '本月 AI 費用已達設定的上限，已改用 Chrome 內建翻譯。可在設定頁調高上限，下個月也會自動恢復。',
       'rate-limit': 'AI 服務目前限制請求，已改用 Chrome 內建翻譯。',
       'no-key': '請先在設定頁填入 OpenRouter 的 API key，已改用內建翻譯。',
       'bad-key': 'API key 無效或沒有權限，已改用內建翻譯。請到設定頁檢查。',
@@ -1530,7 +1537,12 @@
     const previousModel = aiModelKey(tier);
     const previousProfile = translationProfile(settings);
     if (changes[KEYS_KEY]) creditLimitedProviders.clear();
-    if (changes[SETTINGS_KEY]) settings = mergeSettings(changes[SETTINGS_KEY].newValue);
+    if (changes[SETTINGS_KEY]) {
+      const previousLimit = settings.monthlyLimit;
+      settings = mergeSettings(changes[SETTINGS_KEY].newValue);
+      // A new limit is checked again on the next request (picking AI in the menu).
+      if (settings.monthlyLimit !== previousLimit) budgetReached = false;
+    }
     if (job && !settings.prefetchWhole) stopPrefetch(job);
     // A new glossary or fix setting changes the AI's output (and where it is saved).
     const profileChanged = Boolean(previousModel) && previousProfile !== translationProfile(settings);

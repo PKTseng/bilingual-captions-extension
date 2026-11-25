@@ -16,6 +16,7 @@
   // glossary: the user's term list (see parseGlossary). fixAsr: AI also
   // returns auto-generated captions with punctuation and misheard words fixed.
   // prefetchWhole: AI translates the rest of the video in the background.
+  // monthlyLimit: US dollars of AI use per month (usage.js); 0 is no limit.
   const DEFAULT_SETTINGS = {
     tier: 'basic',
     ai: { provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash' },
@@ -23,6 +24,7 @@
     glossary: '',
     fixAsr: true,
     prefetchWhole: true,
+    monthlyLimit: 0,
   };
   const GLOSSARY_MAX_LENGTH = 4000;
   const MODEL_CATALOG = [
@@ -52,6 +54,8 @@
       glossary: typeof src.glossary === 'string' ? src.glossary.slice(0, GLOSSARY_MAX_LENGTH) : '',
       fixAsr: typeof src.fixAsr === 'boolean' ? src.fixAsr : DEFAULT_SETTINGS.fixAsr,
       prefetchWhole: typeof src.prefetchWhole === 'boolean' ? src.prefetchWhole : DEFAULT_SETTINGS.prefetchWhole,
+      monthlyLimit: Number.isFinite(src.monthlyLimit) && src.monthlyLimit > 0
+        ? Math.round(src.monthlyLimit * 100) / 100 : 0,
     };
   }
 
@@ -132,6 +136,7 @@
 
   const AI_ERROR_REASONS = {
     credits: 'AI 帳戶餘額不足',
+    budget: '已達本月 AI 費用上限',
     'rate-limit': 'AI 服務限制請求',
     'no-key': '尚未設定 API key',
     'bad-key': 'API key 無效或沒有權限',

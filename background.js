@@ -1,11 +1,23 @@
 // Service worker: relays AI translation requests from content scripts to the
 // configured provider. API keys are read here only; they never reach content.js.
-importScripts('settings.js');
+importScripts('settings.js', 'usage.js');
 
 const {
   SETTINGS_KEY, KEYS_KEY, REQUEST_TIMEOUT_MS, mergeSettings, buildChatRequest, httpErrorCode,
   fetchWithRetry, fetchErrorCode,
 } = globalThis.bceSettings;
+const { USAGE_KEY, addUsage, overBudget } = globalThis.bceUsage;
+
+// Requests finish together, so their usage is added one after another;
+// otherwise two writes would each start from the same old total.
+let usageWrites = Promise.resolve();
+function recordUsage(usage) {
+  usageWrites = usageWrites.then(async () => {
+    const stored = await chrome.storage.local.get(USAGE_KEY);
+    await chrome.storage.local.set({ [USAGE_KEY]: addUsage(stored[USAGE_KEY], usage, new Date()) });
+  }).catch((error) => console.warn('[bce] 無法記錄 AI 用量：', error));
+  return usageWrites;
+}
 
 async function loadLocalKeys() {
   const keys = {};
@@ -23,11 +35,15 @@ async function loadLocalKeys() {
 }
 
 async function handleAi({ tier, messages }) {
-  const stored = await chrome.storage.local.get([SETTINGS_KEY, KEYS_KEY]);
+  // The total includes every reply already in.
+  await usageWrites;
+  const stored = await chrome.storage.local.get([SETTINGS_KEY, KEYS_KEY, USAGE_KEY]);
   const settings = mergeSettings(stored[SETTINGS_KEY]);
   const keys = { ...stored[KEYS_KEY], ...await loadLocalKeys() };
   const req = buildChatRequest(settings, keys, tier, messages);
   if (req.error) return { ok: false, error: req.error };
+  // Requests already on their way may still go a little past the limit.
+  if (overBudget(stored[USAGE_KEY], settings.monthlyLimit, new Date())) return { ok: false, error: 'budget' };
 
   // One deadline covers the retries too; a pause cut short by it ends in a
   // fetch that fails at once with the timeout.
@@ -55,6 +71,9 @@ async function handleAi({ tier, messages }) {
 
   try {
     const data = await res.json();
+    // Charged even when the reply turns out unusable. Awaited so the worker
+    // is not stopped before the write.
+    await recordUsage(data?.usage);
     const text = data?.choices?.[0]?.message?.content;
     if (typeof text === 'string' && text) return { ok: true, text };
   } catch (error) {

@@ -4,6 +4,8 @@
   'use strict';
 
   const { SOURCE_LANGUAGE_KEY, PREFERENCES, LANGUAGES, mergeSourceLanguage, normalizeLanguage } = globalThis.bceLanguages;
+  const { SETTINGS_KEY, mergeSettings } = globalThis.bceSettings;
+  const { USAGE_KEY, mergeUsage, formatCost } = globalThis.bceUsage;
   // Same key as content.js: every YouTube tab follows it.
   const ENABLED_KEY = 'bceCaptionsEnabled';
   const PREFERENCE_LABELS = { ...PREFERENCES, auto: '自動（跟著影片）' };
@@ -76,6 +78,23 @@
     language.disabled = false;
   }
 
+  // This month's AI spending, once there is some or a limit is set.
+  async function showUsage() {
+    const usageLine = $('#usage');
+    try {
+      const stored = await chrome.storage.local.get([USAGE_KEY, SETTINGS_KEY]);
+      const { current } = mergeUsage(stored[USAGE_KEY]);
+      const limit = mergeSettings(stored[SETTINGS_KEY]).monthlyLimit;
+      const over = limit > 0 && current.cost >= limit;
+      usageLine.hidden = !current.requests && !limit;
+      usageLine.classList.toggle('over', over);
+      usageLine.textContent = `本月 AI 費用 ${formatCost(current.cost)}`
+        + (limit > 0 ? `（上限 ${formatCost(limit)}${over ? '，已暫停 AI' : ''}）` : '');
+    } catch {
+      usageLine.hidden = true;
+    }
+  }
+
   async function save(values) {
     try {
       await chrome.storage.local.set(values);
@@ -93,6 +112,7 @@
     if (area !== 'local') return;
     if (changes[ENABLED_KEY]) enabled.checked = changes[ENABLED_KEY].newValue === true;
     if (changes[SOURCE_LANGUAGE_KEY]) language.value = mergeSourceLanguage(changes[SOURCE_LANGUAGE_KEY].newValue);
+    if (changes[USAGE_KEY] || changes[SETTINGS_KEY]) void showUsage();
     clearTimeout(statusTimer);
     statusTimer = setTimeout(refreshStatus, 600);
   });
@@ -107,6 +127,7 @@
   });
 
   loadPreferences().catch(() => showLine('無法讀取設定，請重新開啟。'));
+  void showUsage();
   void refreshStatus();
   // Captions keep loading while the popup is open.
   setInterval(refreshStatus, 2000);
