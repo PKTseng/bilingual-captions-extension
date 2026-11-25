@@ -1,6 +1,7 @@
 // Runs in the page's own JavaScript world (manifest "world": "MAIN").
-// Downloads the English caption track as json3 (millisecond cue times, plus
-// per-word offsets on auto-generated tracks). Some YouTube sessions only
+// Downloads the caption track in the source language as json3 (millisecond
+// cue times, plus per-word offsets on auto-generated tracks), and reads the
+// video's title, channel and description for AI translation. Some YouTube sessions only
 // serve captions to requests that carry the player's `pot` token, so this
 // script also remembers the player's own timedtext request and reuses its
 // parameters.
@@ -53,13 +54,40 @@
     // Resource timing unavailable.
   }
 
-  function englishTracks(videoId) {
+  // Kept in step with languages.js, which the page world does not load.
+  const SOURCE_CODES = ['en', 'ja', 'ko'];
+  const baseLanguage = (code) => String(code ?? '').toLowerCase().split(/[-_]/)[0];
+  // A copy of content.js from before languages existed asks for English.
+  const wantedLanguage = (value) => value === 'auto' || SOURCE_CODES.includes(value) ? value : 'en';
+
+  function playerResponse(videoId) {
     const response = document.querySelector('#movie_player')?.getPlayerResponse?.();
-    if (response?.videoDetails?.videoId !== videoId) return [];
-    const tracks = response.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
-    // Human-made English first, auto-generated (kind=asr) last.
-    return tracks.filter((track) => /^en\b/i.test(track.languageCode ?? ''))
-      .sort((a, b) => (a.kind === 'asr') - (b.kind === 'asr'));
+    return response?.videoDetails?.videoId === videoId ? response : undefined;
+  }
+
+  const captionTracks = (response) => response?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
+
+  // The order to try tracks in. 'auto' starts with the language spoken in the
+  // video (the one its auto-generated track is in), then English, then the
+  // other supported ones. Human-made tracks come before auto-generated ones.
+  function rankTracks(tracks, wanted) {
+    const spoken = baseLanguage(tracks.find((track) => track.kind === 'asr')?.languageCode);
+    const order = wanted !== 'auto' ? [wanted]
+      : [...new Set([SOURCE_CODES.includes(spoken) ? spoken : 'en', 'en', ...SOURCE_CODES])];
+    return order.flatMap((code) => tracks.filter((track) => baseLanguage(track.languageCode) === code)
+      .sort((a, b) => (a.kind === 'asr') - (b.kind === 'asr')));
+  }
+
+  function videoDetails(videoId, wanted) {
+    const response = playerResponse(videoId);
+    const details = response?.videoDetails;
+    const best = rankTracks(captionTracks(response), wanted)[0];
+    return {
+      title: String(details?.title ?? ''),
+      channel: String(details?.author ?? ''),
+      description: String(details?.shortDescription ?? ''),
+      language: best ? baseLanguage(best.languageCode) : undefined,
+    };
   }
 
   // Start from the player's own request when we have one (it carries the
@@ -91,16 +119,22 @@
     }
   }
 
-  async function load(videoId) {
-    const listed = englishTracks(videoId);
+  async function load(videoId, wanted) {
+    const all = captionTracks(playerResponse(videoId));
+    const listed = rankTracks(all, wanted);
+    // The player lists its tracks, and none is in this language.
+    if (all.length && !listed.length) return { error: 'empty' };
     const base = captured.get(videoId);
     if (!listed.length && !base) return { error: 'no-token' };
+    // Without a track list, guess from the language the player itself asked for.
+    const playerLanguage = base && baseLanguage(new URL(base).searchParams.get('lang'));
+    const guess = wanted !== 'auto' ? wanted : SOURCE_CODES.includes(playerLanguage) ? playerLanguage : 'en';
     const tracks = listed.length ? listed
-      : [{ languageCode: 'en' }, { languageCode: 'en', kind: 'asr' }];
+      : [{ languageCode: guess }, { languageCode: guess, kind: 'asr' }];
     for (const track of tracks) {
       const events = await download(trackUrl(track, base));
       if (events) {
-        return { events, track: { lang: track.languageCode, kind: track.kind ?? '' } };
+        return { events, track: { lang: baseLanguage(track.languageCode), kind: track.kind ?? '' } };
       }
     }
     // Without the player's request the track URLs may need its token.
@@ -109,8 +143,14 @@
 
   window.addEventListener('message', async (event) => {
     const data = event.data;
-    if (event.source !== window || data?.source !== FROM_CONTENT || data.type !== 'load') return;
-    const result = await load(data.videoId);
+    if (event.source !== window || data?.source !== FROM_CONTENT) return;
+    const wanted = wantedLanguage(data.language);
+    if (data.type === 'details') {
+      post({ type: 'details', requestId: data.requestId, videoId: data.videoId, ...videoDetails(data.videoId, wanted) });
+      return;
+    }
+    if (data.type !== 'load') return;
+    const result = await load(data.videoId, wanted);
     post({ type: 'track', requestId: data.requestId, videoId: data.videoId, ...result });
   });
 })();

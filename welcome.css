@@ -1,0 +1,97 @@
+/* The welcome page shares options.css and adds these. */
+.welcome { padding-bottom: 56px; }
+.welcome h2 { margin: 6px 0 14px; font-size: 1.2rem; }
+.welcome h3 { margin: 0 0 6px; font-size: 1rem; }
+
+.steps {
+  display: grid;
+  gap: 18px;
+  margin: 0 0 20px;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.steps li {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  padding-left: 44px;
+  counter-increment: step;
+}
+
+.steps li::before {
+  content: counter(step);
+  position: absolute;
+  top: -2px;
+  left: 0;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.steps span { color: var(--muted); }
+
+.dual-chip, kbd {
+  display: inline-block;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--canvas);
+  font: 700 0.85rem/1.6 Arial, sans-serif;
+}
+
+/* A sketch of the player's control bar, with the icon to look for. */
+.player-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 340px;
+  height: 44px;
+  margin-top: 8px;
+  padding: 0 10px;
+  border-radius: 10px;
+  background: linear-gradient(#0000, #000c), #202020;
+  color: #fff;
+}
+
+.bar-gap { flex: 1; height: 3px; border-radius: 2px; background: #f00; opacity: 0.85; }
+.bar-icon, .bar-dual { display: grid; place-items: center; width: 40px; height: 100%; opacity: 0.85; font: 700 13px/1 Arial, sans-serif; }
+.bar-dual {
+  position: relative;
+  opacity: 1;
+  outline: 2px solid #ffd54a;
+  outline-offset: -6px;
+  border-radius: 8px;
+}
+
+.tips { display: grid; gap: 10px; margin: 0; padding-left: 20px; }
+
+.choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.choices > div { padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; }
+.choices p { margin-bottom: 10px; }
+
+a.primary, a.secondary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 18px;
+  border-radius: 9px;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+a.primary { background: var(--accent); color: #fff; }
+a.primary:hover { background: var(--accent-hover); }
+a.secondary { background: var(--accent-soft); color: var(--accent); }
+a.secondary:hover { outline: 1px solid var(--accent); }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+@media (max-width: 640px) {
+  .choices { grid-template-columns: minmax(0, 1fr); }
+}

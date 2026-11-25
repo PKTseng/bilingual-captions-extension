@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <title>雙語字幕</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="popup">
+    <header>
+      <img src="icons/icon-48.png" alt="" width="28" height="28">
+      <h1>雙語字幕</h1>
+    </header>
+
+    <label class="row switch-row">
+      <span>雙語字幕</span>
+      <input type="checkbox" id="enabled" role="switch" disabled>
+    </label>
+
+    <label class="row">
+      <span>原文語言</span>
+      <select id="language" disabled></select>
+    </label>
+
+    <section id="status" class="status" role="status" aria-live="polite"></section>
+
+    <nav>
+      <button type="button" id="options">翻譯與 API key 設定</button>
+      <button type="button" id="welcome">使用說明</button>
+    </nav>
+  </main>
+
+  <script src="languages.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

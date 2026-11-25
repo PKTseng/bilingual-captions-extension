@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>開始使用雙語字幕</title>
+  <link rel="stylesheet" href="options.css">
+  <link rel="stylesheet" href="welcome.css">
+</head>
+<body>
+  <main class="settings welcome">
+    <header class="page-header">
+      <img src="icons/icon-128.png" alt="" width="52" height="52">
+      <div>
+        <h1>雙語字幕安裝好了</h1>
+        <p>在 YouTube 同時顯示原文和繁體中文字幕，支援英文、日文、韓文影片。</p>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>三步開始</h2>
+      <ol class="steps">
+        <li>
+          <strong>打開一部有字幕的 YouTube 影片。</strong>
+          <span>有人工字幕或自動產生字幕的影片都可以。</span>
+        </li>
+        <li>
+          <strong>把滑鼠移到影片上，點右下角控制列的 <span class="dual-chip" lang="en">Dual</span> 圖示。</strong>
+          <span>會打開「雙語字幕選單」，外觀和 YouTube 的設定選單一樣。</span>
+          <div class="player-bar" aria-hidden="true">
+            <span class="bar-gap"></span>
+            <span class="bar-dual" lang="en">Dual</span>
+            <span class="bar-icon">CC</span>
+            <span class="bar-icon">⚙</span>
+            <span class="bar-icon">⛶</span>
+          </div>
+        </li>
+        <li>
+          <strong>打開「雙語字幕」開關，然後播放。</strong>
+          <span>之後看的影片會自動開啟，直到你把它關掉。</span>
+        </li>
+      </ol>
+      <a class="primary" href="https://www.youtube.com/" target="_blank" rel="noopener">打開 YouTube</a>
+    </section>
+
+    <section class="card">
+      <h2>更快的操作</h2>
+      <ul class="tips">
+        <li><kbd>Alt</kbd> + <kbd>C</kbd>：在影片頁直接開關雙語字幕。</li>
+        <li><kbd>+</kbd>／<kbd>-</kbd>／<kbd>0</kbd>：放大、縮小、恢復字幕大小。</li>
+        <li>點瀏覽器右上角的拼圖圖示，把「雙語字幕」釘選到工具列，就能從工具列開關字幕、選原文語言。</li>
+        <li>滑鼠移到字幕上會停在這一句；點單字可以複製，左邊的按鈕可以重播這句。</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>選擇翻譯方式</h2>
+      <div class="choices">
+        <div>
+          <h3>基本（預設）</h3>
+          <p>Chrome 內建翻譯，在你的電腦上執行，免費、不用設定。第一次使用時，Chrome 可能需要下載語言模型，按字幕上方的按鈕即可。</p>
+        </div>
+        <div>
+          <h3>AI</h3>
+          <p>透過 OpenRouter 呼叫 AI 模型，語氣更自然，人名和專有名詞更一致，也能修正自動字幕的標點和錯字。需要自己的 API key，10 分鐘的影片大約 0.2 美分。</p>
+          <a class="secondary" href="options.html">設定 API key 與模型</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>原文語言</h2>
+      <p>預設是「自動」：影片說英文、日文或韓文時，就用那個語言的字幕當原文；其他語言的影片用英文字幕。也可以在雙語字幕選單或工具列固定成某一種語言。</p>
+    </section>
+  </main>
+</body>
+</html>

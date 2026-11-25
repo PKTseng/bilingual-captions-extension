@@ -48,7 +48,7 @@ test('buildBatch for live captions sends one line with recent context', () => {
 });
 
 test('parseBatchReply strips fences and checks count', () => {
-  assert.deepEqual(ai.parseBatchReply('```json\n{"t":["甲","乙"]}\n```', 2), ['甲', '乙']);
+  assert.deepEqual(ai.parseBatchReply('```json\n{"t":["甲","乙"]}\n```', 2), { t: ['甲', '乙'], s: undefined });
   assert.throws(() => ai.parseBatchReply('{"t":["甲"]}', 2));
   assert.throws(() => ai.parseBatchReply('not json', 1));
 });

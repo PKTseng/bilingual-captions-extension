@@ -1,4 +1,4 @@
-.bce-overlay[hidden], .bce-line[hidden], .bce-notice[hidden], .bce-notice input[hidden], .bce-menu[hidden] {
+.bce-overlay[hidden], .bce-line[hidden], .bce-notice[hidden], .bce-notice [hidden], .bce-menu[hidden] {
   display: none !important;
 }
 
@@ -93,6 +93,17 @@
   }
 }
 
+/* The side padding leaves room for the replay button on the left, and keeps
+   the card centred. */
+.bce-stage {
+  --bce-replay-width: 38px;
+  position: relative;
+  display: flex;
+  box-sizing: border-box;
+  max-width: 100%;
+  padding-inline: var(--bce-replay-width);
+}
+
 .bce-card {
   box-sizing: border-box;
   width: fit-content;
@@ -185,6 +196,62 @@
   color: #fff;
 }
 
+/* Shown while the pointer is on the card. The whole strip left of the card is
+   the button, so the pointer reaches it without leaving the hover area. */
+.bce-replay {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--bce-replay-width);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 5px 0 0;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.bce-replay[hidden] { display: none; }
+
+.bce-overlay.bce-shown .bce-stage:hover .bce-replay,
+.bce-overlay.bce-shown .bce-replay:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* A round chip in the card's colours; the arrow is a mask filled with the text colour. */
+.bce-replay-icon {
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgb(225 236 248 / 40%);
+  border-radius: 50%;
+  background: rgb(38 48 62 / 86%);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 35%), 0 2px 9px rgb(0 0 0 / 25%);
+  transition: background-color 0.12s ease;
+}
+
+.bce-replay-icon::before {
+  content: "";
+  width: 18px;
+  height: 18px;
+  background: currentColor;
+  --bce-replay-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z'/%3E%3C/svg%3E");
+  -webkit-mask: var(--bce-replay-arrow) center / contain no-repeat;
+  mask: var(--bce-replay-arrow) center / contain no-repeat;
+}
+
+.bce-replay:hover .bce-replay-icon { background: rgb(64 80 102 / 92%); }
+.bce-replay:active .bce-replay-icon { transform: scale(0.92); }
+.bce-replay:focus-visible { outline: none; }
+.bce-replay:focus-visible .bce-replay-icon { outline: 2px solid #7dd3fc; outline-offset: 1px; }
+
 .bce-copied {
   position: absolute;
   bottom: calc(100% + 6px);
@@ -224,7 +291,7 @@
   box-shadow: 0 3px 16px rgb(0 0 0 / 35%);
 }
 
-.bce-import {
+.bce-import, .bce-download {
   margin-top: 8px;
   padding: 6px 9px;
   border: 1px solid #888;
@@ -407,9 +474,11 @@
 #movie_player.ytp-big-mode .bce-menu-source { padding-inline: 20px; font-size: 14px; }
 
 @media (prefers-reduced-motion: reduce) {
-  .bce-overlay, .bce-copied, .bce-card .bce-word, .bce-menu-switch, .bce-menu-switch::after {
+  .bce-overlay, .bce-copied, .bce-card .bce-word, .bce-menu-switch, .bce-menu-switch::after,
+  .bce-replay, .bce-replay-icon {
     transition: none;
   }
+  .bce-replay:active .bce-replay-icon { transform: none; }
   .bce-card .bce-word.bce-flash {
     animation: none;
   }

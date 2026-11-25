@@ -4,9 +4,10 @@
 
   const {
     SETTINGS_KEY, KEYS_KEY, TIERS, TIER_LABELS, PROVIDERS, MODEL_CATALOG,
-    mergeSettings, modelMenuKey, describeModel, describeAiError,
+    mergeSettings, parseGlossary, modelMenuKey, describeModel, describeAiError,
   } = globalThis.bceSettings;
   const { createAiTranslator } = globalThis.bceAiTranslator;
+  const { summarize, clearAll } = globalThis.bceTranslationStore;
   const AI_TIERS = ['ai'];
   const AI_PROVIDER = 'openrouter';
   const SAMPLE_CAPTIONS = ['Welcome back to the channel.', 'Today we are going to try something new.'];
@@ -45,6 +46,9 @@
       const box = $(`#${tier}`);
       settings[tier] = { provider: AI_PROVIDER, model: $('.model', box).value };
     }
+    settings.glossary = $('#glossary').value;
+    settings.fixAsr = $('#fix-asr').checked;
+    settings.prefetchWhole = $('#prefetch-whole').checked;
     const keys = { openrouter: $('#key-openrouter').value.trim() };
     return { settings: mergeSettings(settings), keys };
   }
@@ -59,6 +63,9 @@
       $('.model', $(`#${tier}`)).value = settings[tier].model;
     }
     $('#key-openrouter').value = typeof keys.openrouter === 'string' ? keys.openrouter : '';
+    $('#glossary').value = settings.glossary;
+    $('#fix-asr').checked = settings.fixAsr;
+    $('#prefetch-whole').checked = settings.prefetchWhole;
     for (const [key, checkbox] of modelCheckboxes) checkbox.checked = !settings.hiddenModels.includes(key);
     displayedForm = readForm();
   }
@@ -88,6 +95,10 @@
         if (!isHidden && wasHidden) hidden.delete(model);
       }
       settings.hiddenModels = [...hidden];
+      // Only what was edited here; another tab may have changed the rest.
+      for (const key of ['glossary', 'fixAsr', 'prefetchWhole']) {
+        if (draft.settings[key] !== displayed.settings[key]) settings[key] = draft.settings[key];
+      }
       for (const provider of Object.keys(PROVIDERS)) {
         if (draft.keys[provider] !== displayed.keys[provider]) keys[provider] = draft.keys[provider];
       }
@@ -106,6 +117,7 @@
     const translator = createAiTranslator({
       tier,
       getSentences: () => SAMPLE_CAPTIONS,
+      getContext: () => ({ glossary: parseGlossary($('#glossary').value) }),
       send: (payload) => chrome.runtime.sendMessage(payload),
     });
     resultEl.textContent = '正在翻譯測試字幕…';
@@ -148,4 +160,23 @@
     const box = $(`#${tier}`);
     $('.test', box).addEventListener('click', () => test(tier, $('.result', box)));
   }
+
+  const savedResult = $('.result', $('#saved'));
+  async function showSaved() {
+    try {
+      const { videos, lines } = await summarize(chrome.storage.local);
+      savedResult.textContent = videos ? `目前存有 ${videos} 部影片、${lines} 句譯文。` : '目前沒有已存的譯文。';
+    } catch {
+      savedResult.textContent = '無法讀取已存的譯文。';
+    }
+  }
+  $('.clear', $('#saved')).addEventListener('click', async () => {
+    try {
+      await clearAll(chrome.storage.local);
+      await showSaved();
+    } catch {
+      savedResult.textContent = '無法清除，請再試一次。';
+    }
+  });
+  void showSaved();
 })();

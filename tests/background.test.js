@@ -10,7 +10,9 @@ const envUrl = 'chrome-extension://test/.env';
 
 function loadWorker(env, keys) {
   let onMessage;
+  let onInstalled;
   const authHeaders = [];
+  const opened = [];
   vm.runInNewContext(background, {
     importScripts() {},
     bceSettings: settings,
@@ -19,7 +21,9 @@ function loadWorker(env, keys) {
       runtime: {
         getURL: (path) => `chrome-extension://test/${path}`,
         onMessage: { addListener: (listener) => { onMessage = listener; } },
+        onInstalled: { addListener: (listener) => { onInstalled = listener; } },
       },
+      tabs: { create: async ({ url }) => { opened.push(url); } },
       storage: { local: { get: async () => ({ [settings.KEYS_KEY]: keys }) } },
     },
     async fetch(url, options) {
@@ -33,6 +37,8 @@ function loadWorker(env, keys) {
   });
   return {
     authHeaders,
+    opened,
+    install: (reason) => onInstalled({ reason }),
     translate: (tier) => new Promise((resolve) => {
       onMessage({ type: 'bce-ai', tier, messages: [] }, {}, resolve);
     }),
@@ -63,4 +69,13 @@ test('a leftover Gemini key is ignored', async () => {
   assert.equal((await worker.translate('ai')).error, 'no-key');
   assert.equal((await worker.translate('aiFree')).error, 'bad-tier');
   assert.deepEqual(worker.authHeaders, []);
+});
+
+test('a first install opens the welcome page, an update does not', () => {
+  const worker = loadWorker(undefined, {});
+  worker.install('update');
+  worker.install('chrome_update');
+  assert.deepEqual(worker.opened, []);
+  worker.install('install');
+  assert.deepEqual(worker.opened, ['chrome-extension://test/welcome.html']);
 });

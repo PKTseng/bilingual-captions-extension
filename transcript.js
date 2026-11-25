@@ -4,16 +4,37 @@
   'use strict';
 
   const TRANSCRIPT_ROWS = 'ytd-transcript-segment-renderer, transcript-segment-view-model, yt-transcript-segment-view-model';
-  const sentenceSegmenter = new Intl.Segmenter('en', { granularity: 'sentence' });
+  const segmenters = new Map();
+  const sentenceSegmenter = (code) => {
+    if (!segmenters.has(code)) segmenters.set(code, new Intl.Segmenter(code, { granularity: 'sentence' }));
+    return segmenters.get(code);
+  };
+  // English unless the caller passes other traits (see languages.js).
+  const DEFAULT_TRAITS = { code: 'en', spaced: true };
+  const SENTENCE_MARK = /[.!?…。！？]/;
+  // Latin words and numbers inside Japanese still need a space between them.
+  const joiner = (traits, before, after) => traits.spaced
+    || (/[A-Za-z0-9]$/.test(before) && /^[A-Za-z0-9]/.test(after)) ? ' ' : '';
 
   // Joins neighbouring lines, re-splits the text into sentences, and gives
-  // each sentence a time range interpolated from the lines it spans.
-  function sentenceCues(cues) {
+  // each sentence a time range interpolated from the lines it spans. Lines
+  // with hardly any sentence marks (Japanese subtitles leave out 。) have
+  // nothing to re-split at, so each stays a sentence of its own.
+  function sentenceCues(cues, traits = DEFAULT_TRAITS) {
+    traits = { ...DEFAULT_TRAITS, ...traits };
+    const lines = cues.filter((cue) => cue.text.trim());
+    if (lines.length && lines.filter((cue) => SENTENCE_MARK.test(cue.text)).length < lines.length * 0.1) {
+      return lines.map((cue) => ({ ...cue, text: cue.text.replace(/\s+/g, ' ').trim() }))
+        .sort((a, b) => a.start - b.start)
+        .map((cue, index, list) => ({ ...cue, end: Math.min(cue.end, list[index + 1]?.start ?? Infinity) }))
+        .filter((cue) => cue.end > cue.start);
+    }
+    const segmenter = sentenceSegmenter(traits.code);
     const sentences = [];
     let text = '';
     let spans = [];
     function flush() {
-      for (const { segment, index } of sentenceSegmenter.segment(text)) {
+      for (const { segment, index } of segmenter.segment(text)) {
         const phrase = segment.trim();
         if (!phrase) continue;
         const startIndex = index + segment.search(/\S/);
@@ -43,7 +64,7 @@
       if (!line) continue;
       const previous = spans[spans.length - 1];
       if (previous && (cue.start - previous.end > 1 || text.length >= 1000)) flush();
-      if (text) text += ' ';
+      if (text) text += joiner(traits, text, line);
       const from = text.length;
       text += line;
       spans.push({ ...cue, from, to: text.length });
@@ -58,7 +79,8 @@
 
   // Reads the visible transcript panel. Its timestamps only have whole
   // seconds, so each line ends where the next begins (at most 7 s later).
-  function readTranscript(video) {
+  // `chooseTraits` gets the panel's text and returns the language's traits.
+  function readTranscript(video, chooseTraits = () => undefined) {
     const rows = [...document.querySelectorAll(TRANSCRIPT_ROWS)].filter((row) => row.getClientRects().length);
     const segments = rows.flatMap((row) => {
       const stamp = row.querySelector('.segment-timestamp, [class*="timestamp"]')?.textContent.trim();
@@ -75,7 +97,9 @@
           cue.start + 7,
         ),
       }));
-    return sentenceCues(cues.filter((cue) => cue.end > cue.start));
+    const lines = cues.filter((cue) => cue.end > cue.start);
+    if (!lines.length) return [];
+    return sentenceCues(lines, chooseTraits(lines.map((cue) => cue.text).join(' ')));
   }
 
   // Clicks the description's "Show transcript" button; true if it found one.

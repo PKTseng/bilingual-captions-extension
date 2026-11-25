@@ -13,11 +13,18 @@
   const PROVIDERS = {
     openrouter: { label: 'OpenRouter', url: 'https://openrouter.ai/api/v1/chat/completions' },
   };
+  // glossary: the user's term list (see parseGlossary). fixAsr: AI also
+  // returns auto-generated captions with punctuation and misheard words fixed.
+  // prefetchWhole: AI translates the rest of the video in the background.
   const DEFAULT_SETTINGS = {
     tier: 'basic',
     ai: { provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash' },
     hiddenModels: [],
+    glossary: '',
+    fixAsr: true,
+    prefetchWhole: true,
   };
+  const GLOSSARY_MAX_LENGTH = 4000;
   const MODEL_CATALOG = [
     { tier: 'ai', ...DEFAULT_SETTINGS.ai },
     { tier: 'ai', provider: 'openrouter', model: 'qwen/qwen3.7-flash' },
@@ -42,7 +49,45 @@
       ai: mergeTier(src.ai, DEFAULT_SETTINGS.ai),
       hiddenModels: Array.isArray(src.hiddenModels)
         ? [...new Set(src.hiddenModels.filter((key) => typeof key === 'string'))] : [],
+      glossary: typeof src.glossary === 'string' ? src.glossary.slice(0, GLOSSARY_MAX_LENGTH) : '',
+      fixAsr: typeof src.fixAsr === 'boolean' ? src.fixAsr : DEFAULT_SETTINGS.fixAsr,
+      prefetchWhole: typeof src.prefetchWhole === 'boolean' ? src.prefetchWhole : DEFAULT_SETTINGS.prefetchWhole,
     };
+  }
+
+  // One term per line. "LLM = 大型語言模型" (or →, ->) sets how a term is
+  // translated; a term alone ("Kubernetes") is kept as it is. Lines starting
+  // with # are notes. Repeated terms keep their first line.
+  function parseGlossary(text) {
+    const entries = [];
+    const seen = new Set();
+    for (const raw of String(text ?? '').split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const match = /^(.+?)\s*(?:=|＝|→|->)\s*(.*)$/.exec(line);
+      const source = (match ? match[1] : line).trim();
+      const target = (match ? match[2] : '').trim() || source;
+      const key = source.toLowerCase();
+      if (!source || seen.has(key)) continue;
+      seen.add(key);
+      entries.push({ source, target });
+    }
+    return entries;
+  }
+
+  // Besides the model, the glossary and the caption fix change what the AI
+  // returns, so translations saved under other values are kept apart. The
+  // defaults give '' (no suffix on the stored key).
+  function translationProfile(settings) {
+    const glossary = parseGlossary(settings?.glossary).map(({ source, target }) => `${source}=${target}`).join('\n');
+    const fixAsr = settings?.fixAsr !== false;
+    if (!glossary && fixAsr) return '';
+    let hash = 0x811c9dc5;
+    for (const char of `${fixAsr ? 1 : 0}\n${glossary}`) {
+      hash ^= char.codePointAt(0);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash.toString(36);
   }
 
   function listTranslationModels(settings) {
@@ -142,7 +187,8 @@
 
   const api = {
     SETTINGS_KEY, KEYS_KEY, TIERS, TIER_LABELS, PROVIDERS, DEFAULT_SETTINGS, REQUEST_TIMEOUT_MS,
-    MODEL_CATALOG, mergeSettings, modelMenuKey, listTranslationModels, buildChatRequest,
+    MODEL_CATALOG, GLOSSARY_MAX_LENGTH, mergeSettings, parseGlossary, translationProfile,
+    modelMenuKey, listTranslationModels, buildChatRequest,
     httpErrorCode, fetchWithRetry, fetchErrorCode, describeAiError, describeTier, describeModel,
   };
   globalThis.bceSettings = api;

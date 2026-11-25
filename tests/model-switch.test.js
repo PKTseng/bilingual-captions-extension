@@ -1,108 +1,130 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const vm = require('node:vm');
 const settings = require('../settings.js');
-const ai = require('../ai-translator.js');
+const store = require('../translation-store.js');
+const { flush, deferred, openPlayer } = require('./player-harness.js');
 
-// Only the browser boundaries are simulated. Drive the real content script
-// through Alt+C, a storage change and its normal playback poll.
-class Element extends EventTarget {
-  children = [];
-  dataset = {};
-  style = { setProperty() {} };
-  classes = new Set();
-  classList = {
-    add: (name) => this.classes.add(name),
-    remove: (name) => this.classes.delete(name),
-    contains: (name) => this.classes.has(name),
-    toggle: (name, on) => on ? this.classes.add(name) : this.classes.delete(name),
-  };
-  set textContent(value) { this.children = [value]; }
-  get textContent() { return this.children.map((child) => child.textContent ?? child).join(''); }
-  append(...children) { this.children.push(...children); }
-  setAttribute() {}
-  remove() {}
-  getBoundingClientRect() { return { width: 100, height: 40 }; }
-}
-
-const flush = () => new Promise((resolve) => setImmediate(resolve));
-
-function deferred() {
-  let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
-}
-
-async function playerSession(translate = async (text) => '基本 ' + text, live = false) {
-  const elements = [];
-  const document = new EventTarget();
-  document.createElement = () => {
-    const item = new Element();
-    elements.push(item);
-    return item;
-  };
-  const video = { currentTime: 0 };
-  let now = 0;
-  let raw = 'One.';
-  const captions = { getClientRects: () => [1], querySelectorAll: () => [{ textContent: raw }] };
-  const cc = { getAttribute: (key) => key === 'aria-pressed' ? 'true' : null, getClientRects: () => [1] };
-  const player = new Element();
-  player.querySelector = (selector) => ({
-    video, '.ytp-subtitles-button': live && cc, '.ytp-caption-window-container': live && captions,
-  })[selector] || null;
-  document.querySelector = (selector) => selector === '#movie_player' ? player : null;
-  const window = new EventTarget();
-  const cues = ['One', 'Two', 'Three'].map((text, i) => ({ text, start: [0, 2, 180][i], end: [2, 4, 182][i] }));
-  const response = deferred();
-  let poll, changed;
-  const context = {
-    document, window, Element, Event, AbortController, URLSearchParams, performance: { now: () => now },
-    clearTimeout, setTimeout: () => 1,
-    location: new URL('https://www.youtube.com/watch?v=test'),
-    setInterval: (fn) => { poll = fn; }, matchMedia: () => ({ matches: true }),
-    bceTranscript: { readTranscript: () => [] },
-    bcePageBridge: { cachedTimedText: () => live ? undefined : { cues }, requestTimedText: () => new Promise(() => {}) },
-    bceSettings: settings, bceAiTranslator: ai,
-    Translator: { create: async () => ({ translate, destroy() {} }) },
-    chrome: {
-      runtime: { sendMessage: async (payload) => {
-        const { lines } = JSON.parse(payload.messages[1].content);
-        const error = await response.promise;
-        if (error) return { ok: false, error };
-        return { ok: true, text: JSON.stringify({ t: lines.map((line) => 'AI ' + line) }) };
-      } },
-      storage: { local: { get: async () => ({}) }, onChanged: { addListener: (fn) => { changed = fn; } } },
-    },
-  };
-  vm.runInNewContext(fs.readFileSync(require.resolve('../content.js'), 'utf8'), context);
+async function playerSession(translate, live = false, stored = {}) {
+  const session = await openPlayer(translate, live, stored);
+  session.toggleCaptions();
   await flush();
-  window.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyC', altKey: true }));
-  await flush();
-  function say(text) {
-    raw = text;
-    poll();
-    now += 250;
-    poll();
-  }
   if (live) {
-    say('One.');
+    session.say('One.');
     await flush();
   }
-  const line = elements.find((el) => el.className === 'bce-line bce-translation');
-  assert.equal(line.textContent, live ? '基本 One.' : '基本 One');
-  const select = (tier) => changed({ [settings.SETTINGS_KEY]: { newValue: { tier } } }, 'local');
-  select('ai');
+  assert.equal(session.line.textContent, live ? '基本 One.' : '基本 One');
+  session.select('ai');
   await flush();
-  return {
-    line, respond: response.resolve, say, select,
-    toggle: elements.find((el) => el.className === 'bce-toggle'),
-    indicator: elements.find((el) => el.className === 'bce-toggle-source'),
-    display(mode) { changed({ bceCaptionDisplayMode: { newValue: mode } }, 'local'); },
-    stop() { window.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyC', altKey: true })); },
-    go(time) { video.currentTime = time; poll(); },
-  };
+  return session;
 }
+
+test('only a manual toggle changes the saved preference across navigation and fresh sessions', async () => {
+  const stored = {};
+  const first = await openPlayer(undefined, false, stored);
+  assert.equal(first.playingCaptions(), false);
+  first.menuSwitch();
+  assert.equal(first.playingCaptions(), true);
+  first.navigate('silent');
+  assert.equal(first.playingCaptions(), false);
+  first.navigate('next');
+  assert.equal(first.playingCaptions(), true);
+  const reopened = await openPlayer(undefined, false, stored);
+  assert.equal(reopened.playingCaptions(), true);
+  reopened.navigate('silent');
+  reopened.toggleCaptions();
+  reopened.navigate('next');
+  assert.equal(reopened.playingCaptions(), false);
+  assert.equal((await openPlayer(undefined, false, stored)).playingCaptions(), false);
+});
+
+test('other tabs follow both changes to the caption switch', async () => {
+  const session = await openPlayer();
+  session.readyState(0);
+  session.enabledFromOtherTab(true);
+  assert.equal(session.playingCaptions(), false);
+  session.readyState(4);
+  assert.equal(session.playingCaptions(), true);
+  session.enabledFromOtherTab(false);
+  assert.equal(session.playingCaptions(), false);
+  session.navigate('next');
+  assert.equal(session.playingCaptions(), false);
+});
+
+for (const state of ['downloadable', 'downloading', 'available']) {
+  test('automatic basic translation handles a model that is ' + state, async () => {
+    const activation = { isActive: false };
+    let creates = 0;
+    const Translator = {
+      availability: async () => state,
+      create: async () => {
+        creates++;
+        if (state !== 'available' && !activation.isActive) throw new Error('User activation required');
+        return { translate: async (s) => '本機 ' + s, destroy() {} };
+      },
+    };
+    const session = await openPlayer(undefined, false, { bceCaptionsEnabled: true },
+      { Translator, navigator: { userActivation: activation } });
+    if (state !== 'available') {
+      assert.equal(creates, 0);
+      assert.equal(session.playingCaptions(), true);
+      assert.equal(session.notice.hidden, false);
+      assert.equal(session.download.hidden, false);
+      activation.isActive = true;
+      session.download.dispatchEvent(new Event('click'));
+      activation.isActive = false;
+      await flush();
+    }
+    assert.equal(creates, 1);
+    assert.equal(session.line.textContent, '本機 One');
+  });
+}
+
+test('switching from AI to basic offers the model download and turning off cancels it', async () => {
+  let creates = 0;
+  const Translator = { availability: async () => 'downloadable', create() { creates++; } };
+  const session = await openPlayer(undefined, false, { bceCaptionsEnabled: true, bceSettings: { tier: 'ai' } }, { Translator });
+  session.select('basic');
+  await flush();
+  assert.equal(creates, 0);
+  assert.equal(session.download.hidden, false);
+  session.toggleCaptions();
+  assert.equal(session.download.hidden, true);
+  session.download.dispatchEvent(new Event('click'));
+  assert.equal(creates, 0);
+});
+
+test('a late availability check cannot show the download prompt in original-only mode', async () => {
+  const check = deferred();
+  const session = await openPlayer(undefined, false, { bceCaptionsEnabled: true },
+    { Translator: { availability: () => check.promise } });
+  session.display('original');
+  check.resolve('downloadable');
+  await flush();
+  assert.equal(session.download.hidden, true);
+  assert.equal(session.playingCaptions(), true);
+});
+
+test('manually enabling basic translation can use the current gesture immediately', async () => {
+  const activation = { isActive: false };
+  let usedGesture = false;
+  const session = await openPlayer(undefined, false, {}, {
+    navigator: { userActivation: activation },
+    Translator: {
+      availability: async () => 'downloadable',
+      create: async () => {
+        usedGesture = activation.isActive;
+        return { translate: async (s) => '本機 ' + s, destroy() {} };
+      },
+    },
+  });
+  activation.isActive = true;
+  session.menuSwitch();
+  activation.isActive = false;
+  await flush();
+  assert.equal(usedGesture, true);
+  assert.equal(session.download.hidden, true);
+  assert.equal(session.line.textContent, '本機 One');
+});
 
 test('a prefetched Chrome caption stays readable until the matching AI caption arrives', async () => {
   const session = await playerSession();
@@ -187,6 +209,73 @@ test('fallback, original-only mode and stopping clear the AI indicator', async (
   assert.match(session.toggle.textContent, /Chrome$/);
   session.display('original');
   assert.match(session.toggle.textContent, /原文$/);
-  session.stop();
+  session.toggleCaptions();
   assert.equal(session.toggle.textContent, 'Dual');
+});
+
+test('AI translations saved on an earlier visit show at once and are not sent again', async () => {
+  const model = settings.DEFAULT_SETTINGS.ai;
+  const key = store.recordKey('test', `${model.provider}/${model.model}`);
+  const session = await playerSession(undefined, false, { [key]: { lines: [['One', '存 One'], ['Two', '存 Two']] } });
+  await flush();
+  assert.equal(session.line.textContent, '存 One');
+  session.go(2);
+  await flush();
+  assert.equal(session.line.textContent, '存 Two');
+  assert.match(session.toggle.textContent, /AI$/);
+  assert.deepEqual(session.sent, []);
+  // Only the line that was never translated goes to the AI service.
+  session.go(180);
+  await flush();
+  assert.deepEqual(session.sent, ['Three']);
+  session.respond();
+  await flush();
+  assert.equal(session.line.textContent, 'AI Three');
+});
+
+test('replay starts the held sentence over just before its first word and resumes playback', async () => {
+  const session = await openPlayer();
+  session.toggleCaptions();
+  await flush();
+  session.go(3);
+  assert.equal(session.replay.hidden, false);
+  session.video.paused = true;
+  session.replay.dispatchEvent(new Event('click'));
+  assert.ok(Math.abs(session.video.currentTime - 1.8) < 1e-9);
+  assert.equal(session.video.paused, false);
+});
+
+test('replay undoes the caption timing shift so the sentence still starts on its first word', async () => {
+  const session = await openPlayer();
+  session.toggleCaptions();
+  await flush();
+  // Captions 0.5 s earlier: the cue starting at 2 s shows from 1.5 s of video.
+  session.toggle.dispatchEvent(new Event('click'));
+  session.menuItem('timing').dispatchEvent(new Event('click'));
+  session.menuItem('earlier').dispatchEvent(new Event('click'));
+  session.go(2.5);
+  session.replay.dispatchEvent(new Event('click'));
+  assert.ok(Math.abs(session.video.currentTime - 1.3) < 1e-9);
+});
+
+test('live captions have no start time, so replay stays hidden', async () => {
+  const session = await playerSession(undefined, true);
+  assert.equal(session.replay.hidden, true);
+  const before = session.video.currentTime;
+  session.replay.dispatchEvent(new Event('click'));
+  assert.equal(session.video.currentTime, before);
+});
+
+test('the toolbar popup hears what the tab is showing', async () => {
+  const session = await openPlayer();
+  assert.deepEqual(
+    { ...session.status(), translation: undefined },
+    { videoId: 'test', enabled: false, running: false, source: '', language: undefined, translation: undefined, notice: '' },
+  );
+  session.toggleCaptions();
+  await flush();
+  const status = session.status();
+  assert.equal(status.enabled, true);
+  assert.equal(status.running, true);
+  assert.match(status.translation, /基本/);
 });

@@ -27,6 +27,15 @@
         <label>模型 ID
           <input type="text" class="model" aria-label="AI 模型 ID" placeholder="例如 deepseek/deepseek-v4.1-flash" spellcheck="false">
         </label>
+        <label>詞彙表
+          <textarea id="glossary" rows="5" maxlength="4000" spellcheck="false" aria-describedby="glossary-help"
+            placeholder="LLM = 大型語言模型&#10;Kubernetes"></textarea>
+        </label>
+      </div>
+      <p id="glossary-help" class="hint">每行一個詞。「原文 = 譯法」指定怎麼翻，只寫原文代表保留原文，以 # 開頭的行會略過。AI 只會收到這批字幕裡出現的詞。</p>
+      <div class="checks">
+        <label><input type="checkbox" id="fix-asr"> 修正自動產生的字幕：補上標點、改正明顯聽錯的字，並顯示修正後的原文</label>
+        <label><input type="checkbox" id="prefetch-whole"> 影片播放超過 1 分鐘後，在背景翻完整部影片（之後跳到哪裡都不用等，會多花一點費用）</label>
       </div>
       <button type="button" class="test">測試翻譯</button>
       <span class="result" role="status"></span>
@@ -48,6 +57,13 @@
       </div>
     </fieldset>
 
+    <fieldset class="card" id="saved">
+      <legend>已存的 AI 譯文</legend>
+      <p>看過的影片會保留 AI 譯文，重看時直接顯示，不會再收費。最多保留最近 300 部影片（每個模型分開計算）。</p>
+      <button type="button" class="clear">清除已存的譯文</button>
+      <span class="result" role="status"></span>
+    </fieldset>
+
     <footer class="actions">
       <span id="status" role="status"></span>
       <button type="button" id="save">儲存設定</button>
@@ -56,6 +72,7 @@
 
   <script src="settings.js"></script>
   <script src="ai-translator.js"></script>
+  <script src="translation-store.js"></script>
   <script src="options.js"></script>
 </body>
 </html>
