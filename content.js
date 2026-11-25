@@ -30,7 +30,8 @@
   let displayMode = 'bilingual';
   const FONT_SIZE_KEY = 'bceCaptionFontPercent';
   const FONT_SIZES = [75, 100, 125, 150, 200];
-  let fontPercent = 100;
+  const DEFAULT_FONT_PERCENT = 125;
+  let fontPercent = DEFAULT_FONT_PERCENT;
   // Only the tier and model names are read here (SETTINGS_KEY), never API keys.
   let settings = mergeSettings();
   // Until the page reloads or the keys change: an exhausted balance (402)
@@ -55,11 +56,10 @@
 
   const toggle = element('button', 'bce-toggle');
   toggle.type = 'button';
-  toggle.title = '雙語字幕選單';
-  toggle.setAttribute('aria-label', '雙語字幕選單');
   const toggleLabel = element('span', 'bce-toggle-label', 'Dual');
   toggleLabel.lang = 'en';
-  toggle.append(toggleLabel);
+  const toggleSource = element('span', 'bce-toggle-source');
+  toggle.append(toggleLabel, toggleSource);
   const overlay = element('div', 'bce-overlay');
   const card = element('div', 'bce-card');
   const original = element('div', 'bce-line bce-original');
@@ -241,7 +241,9 @@
     if (job && next === 'original') {
       releasePreview(job);
       releaseTranslator(job);
+      if (job.fellBack) cache.clear();
       job.fellBack = undefined;
+      job.showingSelected = false;
       setNotice('');
     } else if (job && previous === 'original') {
       setTranslation(cache.get(original.textContent));
@@ -249,7 +251,7 @@
     } else if (job?.fellBack === 'english') {
       setTranslation(cache.get(original.textContent));
     }
-    updateMenu();
+    updateToggle();
   }
 
   async function chooseDisplayMode(mode) {
@@ -276,7 +278,7 @@
   }
 
   function applyFontSize(value) {
-    fontPercent = FONT_SIZES.includes(value) ? value : 100;
+    fontPercent = FONT_SIZES.includes(value) ? value : DEFAULT_FONT_PERCENT;
     card.style.setProperty('--bce-font-scale', String(fontPercent / 100));
   }
 
@@ -294,7 +296,7 @@
     return [
       backItem('字幕大小'),
       ...FONT_SIZES.map((percent) => {
-        const label = percent === 100 ? '100%（預設）' : `${percent}%`;
+        const label = `${percent}%${percent === DEFAULT_FONT_PERCENT ? '（預設）' : ''}`;
         const item = menuItem(`font-size-${percent}`, label, () => {
           void saveFontSize(percent);
           showMenuPage('main');
@@ -462,7 +464,32 @@
 
   function updateToggle() {
     toggle.setAttribute('aria-pressed', String(Boolean(job)));
+    updateSourceIndicator();
     updateMenu();
+  }
+
+  function updateSourceIndicator() {
+    let label = '';
+    let detail = '';
+    let waiting = false;
+    if (job) {
+      if (displayMode === 'original' || job.fellBack === 'english') {
+        label = displayMode === 'chinese' ? '無中文' : '原文';
+        detail = job.fellBack === 'english' ? '翻譯無法使用' : '只顯示原文';
+      } else {
+        const basic = tier === 'basic' || job.fellBack === 'basic';
+        const source = basic ? 'Chrome 內建翻譯' : describeTier(settings, tier);
+        waiting = !job.showingSelected;
+        label = (basic ? 'Chrome' : 'AI') + (waiting ? '…' : '');
+        detail = waiting ? `等候${source}的譯文` : `字幕來源為 ${source}`;
+      }
+    }
+    const title = detail ? `雙語字幕選單（${detail}）` : '雙語字幕選單';
+    if (toggle.title === title && toggleSource.textContent === label) return;
+    toggleSource.textContent = label;
+    toggleSource.classList.toggle('bce-waiting', waiting);
+    toggle.title = title;
+    toggle.setAttribute('aria-label', title);
   }
 
   function clearOverlay() {
@@ -569,6 +596,7 @@
     if (previous) {
       releasePreview(previous);
       releaseTranslator(previous);
+      if (previous.fellBack) cache.clear();
     }
     currentText = '';
     clearOverlay();
@@ -600,7 +628,7 @@
       return;
     }
     const index = FONT_SIZES.indexOf(fontPercent);
-    const next = event.key === '0' ? 100 : FONT_SIZES[index + (event.key === '+' ? 1 : -1)];
+    const next = event.key === '0' ? DEFAULT_FONT_PERCENT : FONT_SIZES[index + (event.key === '+' ? 1 : -1)];
     if (next !== undefined && next !== fontPercent) void saveFontSize(next);
   }
 
@@ -743,6 +771,7 @@
   // `undefined` means not translated yet: a placeholder stands in while a
   // translator is (or is about to be) at work, but not once only English is left.
   function setTranslation(result) {
+    trackDisplayedSource(result);
     translation.textContent = '';
     const pending = !translation.hidden && result === undefined && Boolean(job) && job.fellBack !== 'english';
     translation.classList.toggle('bce-pending', pending);
@@ -751,8 +780,22 @@
     else appendWords(translation, result ?? '', chineseWords);
   }
 
+  // The selected engine owns cache. A Chrome preview is held separately,
+  // and an AI prefetch counts only once its cue is actually rendered.
+  function trackDisplayedSource(result) {
+    if (!job || translation.hidden) return;
+    const selected = result !== undefined && cache.get(original.textContent) === result;
+    if (job.showingSelected === selected) return;
+    job.showingSelected = selected;
+    updateSourceIndicator();
+  }
+
   function showTranslation(result) {
-    if (held || (translation.textContent === result && !translation.classList.contains('bce-pending'))) return;
+    if (held) return;
+    if (translation.textContent === result && !translation.classList.contains('bce-pending')) {
+      trackDisplayedSource(result);
+      return;
+    }
     resizeSmoothly(() => setTranslation(result));
     reveal(translation);
   }
@@ -1080,7 +1123,8 @@
     if (code === 'credits' && settings[tier]) creditLimitedProviders.add(settings[tier].provider);
     active.fellBack = 'basic';
     active.fallbackCode = code;
-    updateMenu();
+    active.showingSelected = false;
+    updateToggle();
     const notices = {
       credits: 'AI 帳戶餘額不足，已改用 Chrome 內建翻譯。加值後重新整理頁面即可再用。',
       'rate-limit': 'AI 服務目前限制請求，已改用 Chrome 內建翻譯。',
@@ -1097,7 +1141,7 @@
       // installTranslator left the job without a translator: English only.
       active.fellBack = 'english';
       if (job === active && translation.classList.contains('bce-pending')) setTranslation(undefined);
-      updateMenu();
+      updateToggle();
       setPassingNotice(displayMode === 'chinese'
         ? `${describeAiError(code)}，內建翻譯也無法啟動。可在「字幕顯示」切到「只顯示原文」。`
         : code === 'credits'
@@ -1121,8 +1165,9 @@
     if (job) {
       job.fellBack = undefined;
       job.fallbackCode = undefined;
+      job.showingSelected = false;
     }
-    updateMenu();
+    updateToggle();
     if (job && displayMode !== 'original') void startSelectedTranslator(job);
   }
 

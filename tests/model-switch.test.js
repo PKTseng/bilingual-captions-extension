@@ -57,7 +57,8 @@ async function playerSession(translate = async (text) => '基本 ' + text, live 
   const response = deferred();
   let poll, changed;
   const context = {
-    document, window, Element, Event, AbortController, URLSearchParams, performance: { now: () => now }, clearTimeout,
+    document, window, Element, Event, AbortController, URLSearchParams, performance: { now: () => now },
+    clearTimeout, setTimeout: () => 1,
     location: new URL('https://www.youtube.com/watch?v=test'),
     setInterval: (fn) => { poll = fn; }, matchMedia: () => ({ matches: true }),
     bceTranscript: { readTranscript: () => [] },
@@ -67,7 +68,8 @@ async function playerSession(translate = async (text) => '基本 ' + text, live 
     chrome: {
       runtime: { sendMessage: async (payload) => {
         const { lines } = JSON.parse(payload.messages[1].content);
-        await response.promise;
+        const error = await response.promise;
+        if (error) return { ok: false, error };
         return { ok: true, text: JSON.stringify({ t: lines.map((line) => 'AI ' + line) }) };
       } },
       storage: { local: { get: async () => ({}) }, onChanged: { addListener: (fn) => { changed = fn; } } },
@@ -94,6 +96,10 @@ async function playerSession(translate = async (text) => '基本 ' + text, live 
   await flush();
   return {
     line, respond: response.resolve, say, select,
+    toggle: elements.find((el) => el.className === 'bce-toggle'),
+    indicator: elements.find((el) => el.className === 'bce-toggle-source'),
+    display(mode) { changed({ bceCaptionDisplayMode: { newValue: mode } }, 'local'); },
+    stop() { window.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyC', altKey: true })); },
     go(time) { video.currentTime = time; poll(); },
   };
 }
@@ -145,4 +151,42 @@ test('switching back to Chrome ignores a pending AI response', async () => {
   session.respond();
   await flush();
   assert.equal(session.line.textContent, '基本 Two');
+});
+
+test('the player button pulses until an AI translation reaches the screen', async () => {
+  const session = await playerSession();
+  const { toggle } = session;
+  assert.match(toggle.textContent, /AI…/);
+  assert.ok(session.indicator.classList.contains('bce-waiting'));
+  session.go(100); // No visible cue, even after AI finishes prefetching.
+  session.respond();
+  await flush();
+  assert.match(toggle.textContent, /AI…/);
+  session.go(180);
+  assert.match(toggle.textContent, /AI$/);
+  assert.equal(session.indicator.classList.contains('bce-waiting'), false);
+  assert.equal(session.line.textContent, 'AI Three');
+  session.select('basic');
+  await flush();
+  assert.match(toggle.textContent, /Chrome$/);
+});
+
+test('identical Chrome and AI wording still completes the switch', async () => {
+  const session = await playerSession(async (text) => text === 'Two' ? 'AI Two' : '基本 ' + text);
+  session.go(2);
+  assert.match(session.toggle.textContent, /AI…/);
+  session.respond();
+  await flush();
+  assert.match(session.toggle.textContent, /AI$/);
+});
+
+test('fallback, original-only mode and stopping clear the AI indicator', async () => {
+  const session = await playerSession();
+  session.respond('no-key');
+  await flush();
+  assert.match(session.toggle.textContent, /Chrome$/);
+  session.display('original');
+  assert.match(session.toggle.textContent, /原文$/);
+  session.stop();
+  assert.equal(session.toggle.textContent, 'Dual');
 });
