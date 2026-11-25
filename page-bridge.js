@@ -53,7 +53,7 @@
     return timedCache?.videoId === id ? timedCache : undefined;
   }
 
-  // Resolves to { videoId, cues, wordTimed, source } or undefined. When the
+  // Resolves to { videoId, cues, source } or undefined. When the
   // page has no token yet, `nudge` (if given) is called to make the player
   // request captions, and the download is retried once the token arrives.
   async function requestTimedText(id, nudge) {
@@ -73,7 +73,6 @@
     timedCache = {
       videoId: id,
       cues,
-      wordTimed: asr,
       source: asr ? 'YouTube 英文自動字幕' : 'YouTube 英文字幕',
     };
     return timedCache;

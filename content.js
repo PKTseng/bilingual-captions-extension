@@ -4,7 +4,7 @@
   const LANGUAGES = { sourceLanguage: 'en', targetLanguage: 'zh-Hant' };
   const NATIVE_CAPTIONS = '.ytp-caption-window-container';
   const CAPTION_LINES = '.caption-visual-line';
-  const cache = new Map();
+  let cache = new Map();
   const SENTENCE_END = /[.!?]["'”’)\]]*$/;
   const englishWords = new Intl.Segmenter('en', { granularity: 'word' });
   const chineseWords = new Intl.Segmenter('zh-Hant', { granularity: 'word' });
@@ -25,6 +25,12 @@
   // retried, so they start further ahead than the built-in translator.
   const LOOKAHEAD = { basic: { seconds: 60, cues: 15 }, ai: { seconds: 150, cues: 60 } };
   let tier = 'basic';
+  const DISPLAY_MODE_KEY = 'bceCaptionDisplayMode';
+  const DISPLAY_MODES = { bilingual: '雙語', chinese: '只顯示中文', original: '只顯示原文' };
+  let displayMode = 'bilingual';
+  const FONT_SIZE_KEY = 'bceCaptionFontPercent';
+  const FONT_SIZES = [75, 100, 125, 150, 200];
+  let fontPercent = 100;
   // Only the tier and model names are read here (SETTINGS_KEY), never API keys.
   let settings = mergeSettings();
   // Until the page reloads or the keys change: an exhausted balance (402)
@@ -39,7 +45,6 @@
   let advanceSeconds = 0;
   let importedSource = '';
   let displayedCue;
-  let wordElements = [];
 
   function element(tag, className, text) {
     const item = document.createElement(tag);
@@ -100,7 +105,7 @@
 
   // ---- Player menu ----
   // The player icon opens this panel, modelled on YouTube's settings menu: a
-  // main page and the translation and timing sub-pages. renderMenu() rebuilds
+  // main page and its sub-pages. renderMenu() rebuilds
   // the open page from the shared state; updateMenu() does so if it is open.
   const menu = element('div', 'bce-menu');
   menu.id = 'bce-menu';
@@ -127,7 +132,8 @@
   function tierValue() {
     const selected = describeTier(settings, tier);
     if (!job?.fellBack || tier === 'basic') return selected;
-    const status = job.fellBack === 'english' ? '僅顯示英文' : '改用 Chrome 內建';
+    const status = job.fellBack === 'english'
+      ? (displayMode === 'chinese' ? '暫無中文譯文' : '僅顯示英文') : '改用 Chrome 內建';
     return `${selected}\n${describeAiError(job.fallbackCode)}，${status}`;
   }
 
@@ -139,9 +145,7 @@
   function sourceValue() {
     const source = job?.source ?? importedSource;
     if (!source) return '尚未選擇字幕來源';
-    const wordTimed = job ? job.wordTimed : imported.some((cue) => cue.marks?.length);
-    const detail = hasTiming() ? (wordTimed ? '含原始字詞時間碼' : '字詞高亮為估算')
-      : source === '即時 CC' ? '等字幕送到才能合句，可匯入 SRT 使用時間碼' : '';
+    const detail = !hasTiming() && source === '即時 CC' ? '等字幕送到才能合句，可匯入 SRT 使用時間碼' : '';
     return `字幕來源：${source}${detail ? ` · ${detail}` : ''}`;
   }
 
@@ -182,7 +186,11 @@
     onOff.append(glyph('bce-menu-switch'));
     return [
       onOff,
+      menuItem('display-mode', '字幕顯示', () => showMenuPage('display-mode'),
+        { value: DISPLAY_MODES[displayMode], next: true }),
       menuItem('tier', '翻譯', () => showMenuPage('tier'), { value: tierValue(), next: true }),
+      menuItem('font-size', '字幕大小', () => showMenuPage('font-size'),
+        { value: `${fontPercent}%`, next: true }),
       menuItem('timing', '字幕時間', () => showMenuPage('timing'),
         { value: timingValue(), next: true, disabled: !hasTiming() }),
       menuItem('import', '匯入英文 SRT／VTT', () => {
@@ -223,6 +231,80 @@
     ];
   }
 
+  function applyDisplayMode(value) {
+    const next = typeof value === 'string' && Object.hasOwn(DISPLAY_MODES, value) ? value : 'bilingual';
+    if (next === displayMode) return;
+    const previous = displayMode;
+    displayMode = next;
+    original.hidden = next === 'chinese';
+    translation.hidden = next === 'original';
+    if (job && next === 'original') {
+      releasePreview(job);
+      releaseTranslator(job);
+      job.fellBack = undefined;
+      setNotice('');
+    } else if (job && previous === 'original') {
+      setTranslation(cache.get(original.textContent));
+      void startSelectedTranslator(job);
+    } else if (job?.fellBack === 'english') {
+      setTranslation(cache.get(original.textContent));
+    }
+    updateMenu();
+  }
+
+  async function chooseDisplayMode(mode) {
+    applyDisplayMode(mode);
+    try {
+      await chrome.storage.local.set({ [DISPLAY_MODE_KEY]: mode });
+    } catch {
+      setPassingNotice('無法儲存字幕顯示模式，請重新整理頁面。');
+    }
+  }
+
+  function displayModePage() {
+    return [
+      backItem('字幕顯示'),
+      ...Object.entries(DISPLAY_MODES).map(([mode, label]) => {
+        const item = menuItem(`display-${mode}`, label, () => {
+          void chooseDisplayMode(mode);
+          showMenuPage('main');
+        }, { role: 'menuitemradio', checked: mode === displayMode });
+        item.prepend(glyph('bce-menu-check'));
+        return item;
+      }),
+    ];
+  }
+
+  function applyFontSize(value) {
+    fontPercent = FONT_SIZES.includes(value) ? value : 100;
+    card.style.setProperty('--bce-font-scale', String(fontPercent / 100));
+  }
+
+  async function saveFontSize(percent) {
+    applyFontSize(percent);
+    updateMenu();
+    try {
+      await chrome.storage.local.set({ [FONT_SIZE_KEY]: percent });
+    } catch {
+      setPassingNotice('無法儲存字幕大小，請重新整理頁面。');
+    }
+  }
+
+  function fontSizePage() {
+    return [
+      backItem('字幕大小'),
+      ...FONT_SIZES.map((percent) => {
+        const label = percent === 100 ? '100%（預設）' : `${percent}%`;
+        const item = menuItem(`font-size-${percent}`, label, () => {
+          void saveFontSize(percent);
+          showMenuPage('main');
+        }, { role: 'menuitemradio', checked: percent === fontPercent });
+        item.prepend(glyph('bce-menu-check'));
+        return item;
+      }),
+    ];
+  }
+
   function timingPage() {
     return [
       backItem('字幕時間', timingValue()),
@@ -244,6 +326,8 @@
     const focused = menu.contains(document.activeElement) ? document.activeElement.dataset.key : undefined;
     if (menuPage === 'timing' && !hasTiming()) menuPage = 'main';
     menu.replaceChildren(...(menuPage === 'tier' ? tierPage()
+      : menuPage === 'display-mode' ? displayModePage()
+      : menuPage === 'font-size' ? fontSizePage()
       : menuPage === 'timing' ? timingPage() : mainPage()));
     const key = preferKey ?? focused;
     if (focused !== undefined) {
@@ -482,9 +566,10 @@
     job = undefined;
     clearTimeout(noticeTimer);
     hovering = pressing = held = false;
-    previous?.controller.abort();
-    previous?.inFlight?.controller.abort();
-    previous?.translator?.destroy();
+    if (previous) {
+      releasePreview(previous);
+      releaseTranslator(previous);
+    }
     currentText = '';
     clearOverlay();
     player?.classList.remove('bce-replaces-native');
@@ -499,16 +584,24 @@
     : null;
 
   function onCaptionShortcut(event) {
-    if (event.code !== 'KeyC' || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
-      || event.isComposing || event.defaultPrevented || !player || !idFromUrl()) return;
+    if (event.ctrlKey || event.metaKey || event.isComposing || event.defaultPrevented || !player) return;
+    const toggleCaptions = event.altKey && event.code === 'KeyC' && !event.shiftKey;
+    const resizeCaptions = job && !event.altKey && ['+', '-', '0'].includes(event.key);
+    if ((!toggleCaptions && !resizeCaptions) || !idFromUrl()) return;
 
     const target = event.composedPath()[0];
     if (target instanceof Element && (target.isContentEditable || target.closest('input, textarea, select'))) return;
 
     event.preventDefault();
     event.stopPropagation();
-    // Start within the key press so Chrome can download the translation model.
-    if (!event.repeat) void begin();
+    if (toggleCaptions) {
+      // Start within the key press so Chrome can download the translation model.
+      if (!event.repeat) void begin();
+      return;
+    }
+    const index = FONT_SIZES.indexOf(fontPercent);
+    const next = event.key === '0' ? 100 : FONT_SIZES[index + (event.key === '+' ? 1 : -1)];
+    if (next !== undefined && next !== fontPercent) void saveFontSize(next);
   }
 
   // Subtitles sit near the bottom of the video, and move up to clear the
@@ -584,7 +677,6 @@
     }
     active.cues = timed.cues;
     active.source = timed.source;
-    active.wordTimed = timed.wordTimed;
     active.fillGaps = false;
     active.transcriptUntil = 0;
     active.inFlight?.controller.abort();
@@ -634,7 +726,7 @@
 
   function reveal(line) {
     // The placeholder has its own delayed fade-in (subtitles.css).
-    if (reduceMotion.matches || !line.textContent || line.classList.contains('bce-pending')) return;
+    if (line.hidden || reduceMotion.matches || !line.textContent || line.classList.contains('bce-pending')) return;
     line.animate([
       { opacity: 0, transform: 'translateY(0.3em)' },
       { opacity: 1, transform: 'none' },
@@ -652,9 +744,10 @@
   // translator is (or is about to be) at work, but not once only English is left.
   function setTranslation(result) {
     translation.textContent = '';
-    const pending = result === undefined && Boolean(job) && job.fellBack !== 'english';
+    const pending = !translation.hidden && result === undefined && Boolean(job) && job.fellBack !== 'english';
     translation.classList.toggle('bce-pending', pending);
     if (pending) translation.textContent = '翻譯中…';
+    else if (!result && displayMode === 'chinese' && job?.fellBack === 'english') translation.textContent = '暫無中文譯文';
     else appendWords(translation, result ?? '', chineseWords);
   }
 
@@ -669,7 +762,6 @@
     if (!text) {
       // Fade out and keep the last sentence on the card while it fades.
       displayedCue = undefined;
-      wordElements = [];
       clearOverlay();
       return;
     }
@@ -685,7 +777,6 @@
 
   function fillCaption(text, result, cue) {
     displayedCue = cue;
-    wordElements = [];
     original.textContent = '';
     for (const token of text.matchAll(/\S+|\s+/g)) {
       if (!/\S/.test(token[0])) {
@@ -695,64 +786,48 @@
       const span = element('span', 'bce-token');
       appendWords(span, token[0], englishWords);
       original.append(span);
-      if (!cue) continue;
-      span.dataset.word = '';
-      const mark = cue.marks?.find((entry) => entry.index === token.index);
-      wordElements.push({ span, time: mark?.time, fill: 0 });
-    }
-    if (wordElements.length) {
-      let anchor = 0;
-      wordElements[0].time ??= cue.start;
-      for (let i = 1; i <= wordElements.length; i++) {
-        const next = i === wordElements.length ? cue.end : wordElements[i].time;
-        if (next === undefined) continue;
-        const start = wordElements[anchor].time;
-        for (let j = anchor + 1; j < i; j++) {
-          wordElements[j].time = start + (next - start) * (j - anchor) / (i - anchor);
-        }
-        anchor = i;
-      }
-      // A word is "sung" from its start until the next word starts, but not
-      // through a long pause; the last word gets a length estimated from its
-      // letters, since the cue end includes the time it lingers on screen.
-      wordElements.forEach((word, i) => {
-        const next = wordElements[i + 1]?.time;
-        const spoken = Math.min(0.9, Math.max(0.25, 0.12 + 0.065 * word.span.textContent.length));
-        word.end = next === undefined
-          ? Math.min(cue.end, word.time + spoken)
-          : Math.min(next, word.time + 1);
-      });
     }
     setTranslation(result);
   }
 
-  // KTV-style colour sweep: each word fills left to right while it is spoken.
-  function updateFill(time) {
-    for (const word of wordElements) {
-      const length = word.end - word.time;
-      const progress = length > 0 ? (time - word.time) / length : Number(time >= word.time);
-      const fill = Math.round(Math.min(1, Math.max(0, progress)) * 1000) / 10;
-      if (fill === word.fill) continue;
-      word.fill = fill;
-      word.span.style.setProperty('--bce-fill', `${fill}%`);
-    }
+  function storeTranslation(entries, text, result) {
+    if (entries.size >= 4000) entries.delete(entries.keys().next().value);
+    entries.set(text, result);
   }
 
-  // The 75 ms poll is too coarse for a smooth sweep, so the fill follows the
-  // video on every animation frame.
-  function animateFill() {
-    if (retired) return;
-    requestAnimationFrame(animateFill);
-    const video = player?.querySelector('video');
-    if (!job || !displayedCue || !wordElements.length || !video) return;
-    updateFill(video.currentTime + advanceSeconds);
+  // Only the selected model's cache counts toward AI lookahead. The local
+  // translator supplies a provisional result for the visible line only.
+  function captionTranslation(active, text) {
+    const result = cache.get(text);
+    const preview = active.preview;
+    if (result !== undefined || !preview || !text) return result;
+    const local = preview.cache.get(text);
+    if (local === undefined && preview.text !== text) {
+      preview.controller?.abort();
+      preview.text = text;
+      preview.controller = new AbortController();
+      void translatePreview(active, preview, text, preview.controller.signal);
+    }
+    return local;
   }
-  requestAnimationFrame(animateFill);
+
+  async function translatePreview(active, preview, text, signal) {
+    let result;
+    try {
+      result = await preview.translator.translate(text, { signal });
+    } catch {
+      return; // The AI request still owns retry and fallback.
+    }
+    if (signal.aborted || job !== active || active.preview !== preview || idFromUrl() !== videoId) return;
+    storeTranslation(preview.cache, text, result);
+    const visible = active.cues.length ? currentText : active.live.shown;
+    if (text === visible && !cache.has(text)) showTranslation(result);
+  }
 
   function setTimedCaption(active, text, cue) {
+    const result = captionTranslation(active, text);
     if (text === currentText && cue === displayedCue) return;
     currentText = text;
-    const result = cache.get(text);
     if (text && result === undefined && active.inFlight?.text !== text) {
       active.inFlight?.controller.abort();
     }
@@ -807,8 +882,9 @@
     }
     const sentence = live.wanted;
     if (!sentence) return;
+    const result = captionTranslation(active, sentence);
     if (sentence !== live.shown) {
-      renderCaption(sentence, cache.get(sentence));
+      renderCaption(sentence, result);
       live.shown = sentence;
       live.shownAt = now;
     }
@@ -855,7 +931,6 @@
     const fallback = !currentCue && active.fillGaps
       ? readNativeCaption().replace(/\s+/g, ' ').trim() : '';
     setTimedCaption(active, currentCue?.text ?? fallback, currentCue);
-    if (currentCue) updateFill(time);
 
     if (currentText && active.translator && !active.receivedCaption) {
       active.receivedCaption = true;
@@ -889,8 +964,7 @@
       const result = await translator.translate(text, { signal: controller.signal });
       if (job !== active || controller.signal.aborted || idFromUrl() !== videoId) return;
       active.aiFailures = 0;
-      if (cache.size >= 4000) cache.delete(cache.keys().next().value);
-      cache.set(text, result);
+      storeTranslation(cache, text, result);
       if (text === currentText || (!active.cues.length && text === active.live.shown)) {
         showTranslation(result);
       }
@@ -918,7 +992,7 @@
   }
 
   // Built-in translators have no `kind`; AI ones say `kind: 'ai'`.
-  async function createTranslator(active, wanted) {
+  async function createTranslator(active, wanted, signal) {
     if (wanted !== 'basic') {
       return createAiTranslator({
         tier: wanted,
@@ -936,30 +1010,54 @@
     }
     return Translator.create({
       ...LANGUAGES,
-      signal: active.controller.signal,
+      signal,
       monitor(download) {
         // Quiet once another translator took over (a tier switch mid-download).
         download.addEventListener('downloadprogress', (event) => {
-          if (job === active && !active.translator) setNotice(`下載語言模型 ${Math.round(event.loaded * 100)}%`);
+          if (!signal.aborted && !active.translator) setNotice(`下載語言模型 ${Math.round(event.loaded * 100)}%`);
         });
       }
     });
+  }
+
+  function releaseTranslator(active) {
+    active.translatorRequest?.abort();
+    active.inFlight?.controller.abort();
+    active.translator?.destroy();
+    active.translator = undefined;
+  }
+
+  function releasePreview(active) {
+    const preview = active.preview;
+    if (!preview) return;
+    preview.controller?.abort();
+    releaseTranslator(preview);
+    active.preview = undefined;
   }
 
   // Replaces the job's translator. Until the new one is ready there is none,
   // so refresh() skips translating; a newer request (tier switch, fallback)
   // or a different job supersedes this one, which then resolves to false.
   async function installTranslator(active, wanted) {
-    const request = {};
-    active.translatorRequest = request;
-    active.inFlight?.controller.abort();
-    active.translator?.destroy();
-    active.translator = undefined;
+    releaseTranslator(active);
     active.aiFailures = 0;
     active.retryAt = 0;
-    const current = () => job === active && active.translatorRequest === request;
+    if (wanted === 'basic' && active.preview) {
+      const preview = active.preview;
+      preview.controller?.abort();
+      active.translator = preview.translator;
+      active.translatorRequest = preview.translatorRequest;
+      cache = preview.cache;
+      active.preview = undefined;
+      currentText = '';
+      active.live.shown = '';
+      return true;
+    }
+    const request = new AbortController();
+    active.translatorRequest = request;
+    const current = () => job === active && !request.signal.aborted;
     try {
-      const translator = await createTranslator(active, wanted);
+      const translator = await createTranslator(active, wanted, request.signal);
       if (!current()) {
         translator.destroy();
         return false;
@@ -998,9 +1096,11 @@
     } catch {
       // installTranslator left the job without a translator: English only.
       active.fellBack = 'english';
-      if (job === active && translation.classList.contains('bce-pending')) setTranslation('');
+      if (job === active && translation.classList.contains('bce-pending')) setTranslation(undefined);
       updateMenu();
-      setPassingNotice(code === 'credits'
+      setPassingNotice(displayMode === 'chinese'
+        ? `${describeAiError(code)}，內建翻譯也無法啟動。可在「字幕顯示」切到「只顯示原文」。`
+        : code === 'credits'
         ? 'AI 帳戶餘額不足，Chrome 內建翻譯也無法啟動，暫時只顯示英文字幕。'
         : globalThis.Translator
         ? 'AI 暫時無法使用，內建翻譯也無法啟動。請在選單把翻譯切到「基本」，再重新開啟雙語字幕下載語言模型。'
@@ -1008,28 +1108,37 @@
     }
   }
 
-  async function switchTier(next) {
+  function switchTier(next) {
+    if (next !== 'basic' && job?.translator && job.translator.kind !== 'ai') {
+      // Transfer ownership of the Chrome session, including its lifetime
+      // signal, before installing AI. Only its old per-line request stops.
+      job.preview = { translator: job.translator, translatorRequest: job.translatorRequest, cache };
+      job.translator = undefined;
+      job.translatorRequest = undefined;
+    }
     tier = next;
-    cache.clear();
+    cache = new Map();
     if (job) {
       job.fellBack = undefined;
       job.fallbackCode = undefined;
     }
     updateMenu();
-    const active = job;
-    if (!active) return;
-    const limit = usageLimit(next);
+    if (job && displayMode !== 'original') void startSelectedTranslator(job);
+  }
+
+  async function startSelectedTranslator(active) {
+    const limit = usageLimit(tier);
     if (limit) {
       await fallBack(active, { code: limit });
       return;
     }
-    if (next === 'basic' && !globalThis.Translator) {
+    if (tier === 'basic' && !globalThis.Translator) {
       stop(false);
       setNotice('這個 Chrome 環境無法使用內建翻譯。');
       return;
     }
     try {
-      if (!(await installTranslator(active, next))) return;
+      if (!(await installTranslator(active, tier))) return;
       updateMenu();
       refresh();
     } catch {
@@ -1057,7 +1166,13 @@
   }
 
   function onSettingsChanged(changes, areaName) {
-    if (retired || areaName !== 'local' || (!changes[SETTINGS_KEY] && !changes[KEYS_KEY])) return;
+    if (retired || areaName !== 'local') return;
+    if (changes[DISPLAY_MODE_KEY]) applyDisplayMode(changes[DISPLAY_MODE_KEY].newValue);
+    if (changes[FONT_SIZE_KEY]) applyFontSize(changes[FONT_SIZE_KEY].newValue);
+    if (!changes[SETTINGS_KEY] && !changes[KEYS_KEY]) {
+      if (changes[FONT_SIZE_KEY]) updateMenu();
+      return;
+    }
     const previousModel = aiModelKey(tier);
     if (changes[KEYS_KEY]) creditLimitedProviders.clear();
     if (changes[SETTINGS_KEY]) settings = mergeSettings(changes[SETTINGS_KEY].newValue);
@@ -1068,10 +1183,12 @@
     }
   }
 
-  async function loadTier() {
+  async function loadPreferences() {
     try {
-      const stored = await chrome.storage.local.get(SETTINGS_KEY);
+      const stored = await chrome.storage.local.get([SETTINGS_KEY, FONT_SIZE_KEY, DISPLAY_MODE_KEY]);
       if (retired) return;
+      applyDisplayMode(stored[DISPLAY_MODE_KEY]);
+      applyFontSize(stored[FONT_SIZE_KEY]);
       settings = mergeSettings(stored[SETTINGS_KEY]);
       if (settings.tier !== tier) void switchTier(settings.tier);
       else updateMenu();
@@ -1155,18 +1272,16 @@
       setNotice('播放器目前沒有可用的 CC。可匯入從 DownSub 下載的英文 SRT。');
       return;
     }
-    if (tier === 'basic' && !globalThis.Translator) {
+    if (displayMode !== 'original' && tier === 'basic' && !globalThis.Translator) {
       stop(false);
       setNotice('這個 Chrome 環境無法使用內建翻譯。');
       return;
     }
 
     const active = {
-      controller: new AbortController(),
       receivedCaption: false,
       cues,
       source: imported.length ? importedSource : timed ? timed.source : cues.length ? 'YouTube 逐字稿' : '即時 CC',
-      wordTimed: imported.length ? imported.some((cue) => cue.marks?.length) : Boolean(timed?.wordTimed),
       fillGaps: nativeAvailable && !timed,
       ccWasOn: nativeAvailable && !restoreCc,
       live: { raw: '', buffer: '', lastSeen: -Infinity },
@@ -1178,13 +1293,15 @@
     job = active;
     updateToggle();
     const limit = usageLimit(tier);
-    if (!limit) {
+    if (displayMode === 'original') setNotice('');
+    else if (!limit) {
       setNotice(tier === 'basic' ? '正在準備 Chrome 內建翻譯…' : `正在準備 AI 翻譯（${TIER_LABELS[tier]}）…`);
     }
     player.classList.add('bce-replaces-native');
     if (fetchingTimed) void loadTimedText(active);
     refresh();
 
+    if (displayMode === 'original') return;
     if (limit) {
       await fallBack(active, { code: limit });
       return;
@@ -1263,5 +1380,5 @@
 
   updateToggle();
   syncPage();
-  void loadTier();
+  void loadPreferences();
 })();
