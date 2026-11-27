@@ -42,8 +42,12 @@
       const eventStart = event.tStartMs / 1000;
       const eventEnd = (event.tStartMs + (event.dDurationMs ?? 0)) / 1000;
       const segs = event.segs
-        .map((seg) => ({ text: (seg.utf8 ?? '').replace(/\s+/g, ' ').trim(), time: eventStart + (seg.tOffsetMs ?? 0) / 1000 }))
+        .map((seg) => {
+          const text = (seg.utf8 ?? '').replace(/\s+/g, ' ');
+          return { text: traits.preserveSpaces ? text : text.trim(), time: eventStart + (seg.tOffsetMs ?? 0) / 1000 };
+        })
         .filter((seg) => seg.text);
+      let spaceBefore = true;
       segs.forEach((seg, i) => {
         const until = Math.max(seg.time, segs[i + 1]?.time ?? eventEnd);
         const length = seg.text.length;
@@ -54,9 +58,13 @@
             continue;
           }
           const start = seg.time + (until - seg.time) * (match.index / length);
-          words.push({ text: match[0], start, end: eventEnd, breakBefore: speakerChange });
+          const word = { text: match[0], start, end: eventEnd, breakBefore: speakerChange };
+          if (traits.preserveSpaces) word.spaceBefore = spaceBefore || seg.text[match.index - 1] === ' ';
+          words.push(word);
+          spaceBefore = false;
           speakerChange = false;
         }
+        if (seg.text.endsWith(' ')) spaceBefore = true;
       });
       if (words.length) words[words.length - 1].lineEnd = true;
     }
@@ -120,7 +128,7 @@
     traits = withDefaults(traits);
     let text = '';
     const marks = words.map((word) => {
-      if (text) text += joiner(traits, text, word.text);
+      if (text) text += traits.preserveSpaces ? (word.spaceBefore ? ' ' : '') : joiner(traits, text, word.text);
       const mark = { index: text.length, time: word.start };
       text += word.text;
       return mark;

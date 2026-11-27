@@ -64,6 +64,7 @@ async function openPlayer(translate = async (text) => '基本 ' + text, live = f
   const payloads = [];
   const context = {
     document, window, Element, Event, AbortController, URLSearchParams, performance: { now: () => now },
+    getSelection: () => ({ rangeCount: 0 }),
     clearTimeout, setTimeout: () => 1,
     location: new URL('https://www.youtube.com/watch?v=test'),
     setInterval: (fn) => { poll = fn; }, matchMedia: () => ({ matches: true }),
@@ -75,6 +76,7 @@ async function openPlayer(translate = async (text) => '基本 ' + text, live = f
       cachedVideoDetails: () => undefined,
     },
     bceLanguages: languages,
+    bceSevenKnights: require('../seven-knights-glossary.js'),
     bceSettings: settings, bceAiTranslator: ai,
     // Writes wait for a flush that these tests never trigger.
     bceTranslationStore: {
@@ -86,6 +88,7 @@ async function openPlayer(translate = async (text) => '基本 ' + text, live = f
     ...browser,
     chrome: {
       runtime: { sendMessage: async (payload) => {
+        if (payload.type === 'bce-seven-knights-terms') return require('../data/seven-knights-terms.json');
         const { lines } = JSON.parse(payload.messages[1].content);
         sent.push(...lines);
         payloads.push(payload);
@@ -114,6 +117,7 @@ async function openPlayer(translate = async (text) => '基本 ' + text, live = f
   const select = (tier) => changed({ [settings.SETTINGS_KEY]: { newValue: { tier } } }, 'local');
   return {
     line, respond: response.resolve, say, select, sent, payloads,
+    stage: elements.find((el) => el.className === 'bce-stage'),
     original: elements.find((el) => el.className === 'bce-line bce-original'),
     // Playback moves on by `ms` in poll-sized steps.
     play(ms) {
@@ -125,6 +129,7 @@ async function openPlayer(translate = async (text) => '基本 ' + text, live = f
     sourceLanguage(value) { changed({ bceSourceLanguage: { newValue: value } }, 'local'); },
     toggle: elements.find((el) => el.className === 'bce-toggle'),
     indicator: elements.find((el) => el.className === 'bce-toggle-source'),
+    toast: elements.find((el) => el.className === 'bce-copied'),
     download: elements.find((el) => el.className === 'bce-download'),
     notice: elements.find((el) => el.className === 'bce-notice'),
     replay: elements.find((el) => el.className === 'bce-replay'),

@@ -1,6 +1,6 @@
 # 專案說明（給 AI agent）
 
-YouTube 原文（英文、日文、韓文）／繁中雙字幕的 Chrome MV3 擴充功能，無打包工具、無相依套件。使用者介面文字一律用繁體中文。
+YouTube 原文（英文、日文、韓文、泰文）／繁中雙字幕的 Chrome MV3 擴充功能，無打包工具、無相依套件。使用者介面文字一律用繁體中文。
 
 ## 檔案分工
 
@@ -17,10 +17,10 @@ YouTube 原文（英文、日文、韓文）／繁中雙字幕的 Chrome MV3 擴
 | `translation-store.js` | content script、設定頁 | 把 AI 譯文（與修正後的原文）依影片＋模型存進 `chrome.storage.local`（延遲合併寫入、超過 300 筆刪最舊）、統計與清除 | `globalThis.bceTranslationStore` |
 | `usage.js` | 背景程式（`importScripts`）、設定頁、工具列小視窗 | 按月累計 OpenRouter 回報的 AI 費用與 token（`bceUsage`）、判斷是否超過每月上限、格式化（純函式） | `globalThis.bceUsage` |
 | `content.js` | content script | 主程式：UI、字幕渲染、`job` 狀態機、原文語言、翻譯（依等級建立翻譯器、AI 失敗退回內建、整部預翻）、回應工具列小視窗、事件綁定 | 無（最後載入） |
-| `background.js` | service worker | 讀 API key（設定頁或本機 `.env`）、代為呼叫 OpenRouter、記錄用量並在超過每月上限時回 `budget`、首次安裝打開 `welcome.html` | 只透過 `chrome.runtime` 訊息溝通 |
+| `background.js` | service worker | 讀 API key（設定頁或本機 `.env`）、代為呼叫 OpenRouter、記錄用量並在超過每月上限時回 `budget` | 只透過 `chrome.runtime` 訊息溝通 |
 | `options.html`／`options.js` | 擴充功能選項頁 | 編輯預設等級、模型、API key、詞彙表與 AI 選項 | 無 |
 | `popup.html`／`popup.js` | 工具列小視窗（`action`） | 開關雙語字幕、選原文語言、顯示目前分頁狀態 | 無 |
-| `welcome.html` | 擴充功能頁 | 首次安裝的使用說明（靜態，沒有 script） | 無 |
+| `welcome.html` | 擴充功能頁 | 從工具列小視窗開啟的使用說明（靜態，沒有 script） | 無 |
 | `subtitles.css` | content script | 所有樣式，class 前綴 `bce-` | |
 
 ## 慣例

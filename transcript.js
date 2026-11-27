@@ -13,7 +13,7 @@
   const DEFAULT_TRAITS = { code: 'en', spaced: true };
   const SENTENCE_MARK = /[.!?…。！？]/;
   // Latin words and numbers inside Japanese still need a space between them.
-  const joiner = (traits, before, after) => traits.spaced
+  const joiner = (traits, before, after) => traits.spaced || traits.preserveSpaces
     || (/[A-Za-z0-9]$/.test(before) && /^[A-Za-z0-9]/.test(after)) ? ' ' : '';
 
   // Joins neighbouring lines, re-splits the text into sentences, and gives

@@ -33,7 +33,7 @@
 
   // `fixSource`: the lines are auto-generated captions, and the reply also
   // carries them corrected (s) next to the translations (t).
-  function systemPrompt({ languageName = '英文', fixSource = false, hasVideo = false, hasGlossary = false } = {}) {
+  function systemPrompt({ languageName = '英文', fixSource = false, hasVideo = false, hasGlossary = false, gameContext = false } = {}) {
     const rules = [
       `你是影片字幕翻譯員。請把 lines 中的${languageName}句子逐句翻成台灣用語的繁體中文。`,
       'context 是前文，只供理解語境，不要翻譯。',
@@ -44,6 +44,15 @@
       : '品牌與產品名稱保留原文；人名有通行的中文譯名時用譯名，否則保留原文。');
     if (hasGlossary) {
       rules.push('glossary 是使用者指定的詞彙對照：原文出現這些詞時，必須用指定的寫法（值與原文相同代表保留原文）。');
+    }
+    if (languageName === '韓文') {
+      rules.push('用自然的台灣口語翻出說話者的意思，保留否定、反問、玩笑與敬語的語氣。省略的主詞或親屬關係只有在前後文明確時才補出；不要把不同說話者的台詞合併。');
+    }
+    if (gameContext) {
+      rules.push('這是《七騎士 Re:BIRTH》的影片。gameTerms 列出這批字幕可能提到的遊戲名稱、角色、技能與裝備。只有詞在句中確實指該遊戲實體時才採用對照；同形的日常口語依句意翻譯。保留解說中的條件、回合、次數與數值。');
+      if (languageName === '韓文') {
+        rules.push('談角色養成、比較玩家已達階段時，6초、12초 可能是 6초월、12초월 的簡稱，譯為「超越 6 階、超越 12 階」。달릴까 말까 接在養成目標後是「要不要衝到那一階」。談冷卻、持續或等待時間時，초 仍譯為「秒」。');
+      }
     }
     if (fixSource) {
       rules.push(
@@ -100,7 +109,25 @@
     const after = letters(fixed);
     if (!after) return false;
     const ratio = after.length / Math.max(1, before.length);
-    return ratio >= 0.6 && ratio <= 1.5;
+    if (ratio < 0.6 || ratio > 1.5) return false;
+    if (before === after) return true;
+    // Count shared adjacent letters, allowing small spelling corrections
+    // while rejecting a different sentence of roughly the same length.
+    const pairs = new Map();
+    for (let i = 1; i < before.length; i++) {
+      const pair = before.slice(i - 1, i + 1);
+      pairs.set(pair, (pairs.get(pair) ?? 0) + 1);
+    }
+    let shared = 0;
+    for (let i = 1; i < after.length; i++) {
+      const pair = after.slice(i - 1, i + 1);
+      const count = pairs.get(pair);
+      if (count > 0) {
+        shared++;
+        pairs.set(pair, count - 1);
+      }
+    }
+    return shared > 0 && shared * 2 >= Math.max(before.length, after.length) - 1;
   }
 
   function buildBatch(sentences, text, done, recent) {
@@ -124,14 +151,16 @@
   function buildMessages({ lines, context }, options = {}) {
     const video = compactVideo(options.video);
     const glossary = relevantGlossary(options.glossary, lines);
+    const gameTerms = relevantGlossary(options.gameTerms, lines);
     const payload = {};
     if (video) payload.video = video;
     if (glossary) payload.glossary = glossary;
+    if (gameTerms) payload.gameTerms = gameTerms;
     payload.context = context;
     payload.lines = lines;
     const prompt = systemPrompt({
       languageName: options.languageName, fixSource: Boolean(options.fixSource),
-      hasVideo: Boolean(video), hasGlossary: Boolean(glossary),
+      hasVideo: Boolean(video), hasGlossary: Boolean(glossary), gameContext: Array.isArray(options.gameTerms),
     });
     return [
       { role: 'system', content: prompt },
@@ -168,13 +197,16 @@
     tier, getSentences, send, wait = pause, seed, seedSources, onResult, getContext = () => ({}),
   }) {
     const results = new Map(seed);
-    const sources = new Map(seedSources);
+    const sources = new Map();
+    for (const [line, fixed] of seedSources ?? []) {
+      if (plausibleFix(line, fixed)) sources.set(line, fixed);
+    }
     const pending = new Map();
     let recent = [];
     let destroyed = false;
 
     async function request(lines, context) {
-      const options = getContext() ?? {};
+      const options = getContext(lines) ?? {};
       const withSource = Boolean(options.fixSource);
       let res;
       try {

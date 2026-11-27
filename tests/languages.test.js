@@ -8,6 +8,7 @@ test('language codes are reduced to the supported base language', () => {
   assert.equal(lang.normalizeLanguage('en-US'), 'en');
   assert.equal(lang.normalizeLanguage('ja'), 'ja');
   assert.equal(lang.normalizeLanguage('ko_KR'), 'ko');
+  assert.equal(lang.normalizeLanguage('th-TH'), 'th');
   assert.equal(lang.normalizeLanguage('zh-Hant'), undefined);
   assert.equal(lang.normalizeLanguage(undefined), undefined);
   assert.equal(lang.traitsOf('fr').code, 'en');
@@ -24,6 +25,7 @@ test('caption text is recognised by its script', () => {
   assert.equal(lang.detectLanguage('今日はいい天気ですね'), 'ja');
   assert.equal(lang.detectLanguage('[音楽] さあ、始めましょう'), 'ja');
   assert.equal(lang.detectLanguage('안녕하세요 여러분'), 'ko');
+  assert.equal(lang.detectLanguage('วันนี้เราจะพูดถึง YouTube'), 'th');
   // A few Japanese words in an English line do not make it Japanese.
   assert.equal(lang.detectLanguage('We ate sushi at a place called すし with friends today'), 'en');
 });
@@ -32,9 +34,18 @@ test('the menu shows the language auto has found', () => {
   assert.equal(lang.describePreference('auto'), '自動');
   assert.equal(lang.describePreference('auto', 'ja'), '自動 · 日文');
   assert.equal(lang.describePreference('ko', 'ja'), '韓文');
+  assert.equal(lang.describePreference('auto', 'th'), '自動 · 泰文');
+  assert.equal(lang.mergeSourceLanguage('th'), 'th');
 });
 
 const ja = lang.traitsOf('ja');
+
+test('Thai captions retain phrase spaces and join adjacent timed fragments', () => {
+  const segs = ['สวัสดี', 'ครับ', ' ', 'วันนี้ อากาศดี'].map((utf8, i) => ({ utf8, tOffsetMs: i * 120 }));
+  const [cue] = captions.fromJson3([{ tStartMs: 0, dDurationMs: 1600, segs }], { asr: true, traits: lang.traitsOf('th') });
+  assert.equal(cue.text, 'สวัสดีครับ วันนี้ อากาศดี');
+  assert.deepEqual(cue.marks.map(({ index }) => cue.text.slice(index).split(' ')[0]), ['สวัสดีครับ', 'ครับ', 'วันนี้', 'อากาศดี']);
+});
 
 test('Japanese json3 lines split at 。 inside a line and join without spaces', () => {
   const events = [

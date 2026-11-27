@@ -7,7 +7,7 @@ const code = fs.readFileSync(require.resolve('../page-hook.js'), 'utf8');
 
 // Runs page-hook.js against a fake player. `served` lists the tracks the
 // server has events for, as "lang/kind" ("ja/asr", "en/").
-function loadHook(tracks, { served = tracks.map((t) => `${t.languageCode}/${t.kind ?? ''}`), details = {} } = {}) {
+function loadHook(tracks, { served = tracks.map((t) => `${t.languageCode}/${t.kind ?? ''}`), details = {}, audioTracks = [] } = {}) {
   const posted = [];
   const fetched = [];
   const window = new EventTarget();
@@ -26,6 +26,7 @@ function loadHook(tracks, { served = tracks.map((t) => `${t.languageCode}/${t.ki
   function XMLHttpRequest() {}
   XMLHttpRequest.prototype.open = function () {};
   const response = {
+    streamingData: { adaptiveFormats: audioTracks.map((audioTrack) => ({ audioTrack })) },
     videoDetails: { videoId: 'v1', title: 'A title', author: 'A channel', shortDescription: 'About it', ...details },
     captions: { playerCaptionsTracklistRenderer: { captionTracks: tracks.map((t) => ({ baseUrl: '/api/timedtext?v=v1', ...t })) } },
   };
@@ -69,6 +70,38 @@ test('auto picks the spoken language (its auto track), human-made first', async 
 test('auto falls back to English when the spoken language is not supported', async () => {
   const hook = loadHook([{ languageCode: 'zh', kind: 'asr' }, { languageCode: 'en-US' }]);
   assert.deepEqual((await hook.ask('load', 'auto')).track, { lang: 'en', kind: '' });
+});
+
+test('auto follows the original audio even when the first ASR belongs to a dub', async () => {
+  for (const original of ['en-US', 'ko']) {
+    const hook = loadHook([...tracks, { languageCode: original }], {
+      audioTracks: [{ id: 'ja.10', audioIsDefault: true }, { id: original + '.4' }],
+    });
+    const lang = original.split('-')[0];
+    assert.equal((await hook.ask('details', 'auto')).language, lang);
+    assert.equal((await hook.ask('load', 'auto')).track.lang, lang);
+    assert.equal((await hook.ask('load', 'ja')).track.lang, 'ja');
+  }
+});
+
+test('ambiguous ASR languages prefer English and an empty English track never switches languages', async () => {
+  const hook = loadHook([...tracks, { languageCode: 'en', kind: 'asr' }], { served: ['ja/'] });
+  assert.equal((await hook.ask('details', 'auto')).language, 'en');
+  assert.equal((await hook.ask('load', 'auto')).error, 'no-token');
+  assert.deepEqual(hook.fetched, ['en/', 'en/asr']);
+});
+
+test('the original audio identifies the language even before any captions are listed', async () => {
+  const hook = loadHook([], { audioTracks: [{ id: 'en-US.4' }] });
+  assert.equal((await hook.ask('details', 'auto')).language, 'en');
+  assert.equal((await loadHook([]).ask('details', 'auto')).language, undefined);
+});
+
+test('automatic and explicit Thai prefer the Thai human-made track', async () => {
+  const hook = loadHook([{ languageCode: 'en' }, { languageCode: 'th', kind: 'asr' }, { languageCode: 'th' }]);
+  for (const preference of ['auto', 'th']) {
+    assert.deepEqual((await hook.ask('load', preference)).track, { lang: 'th', kind: '' });
+  }
 });
 
 test('a chosen language takes only its own tracks', async () => {

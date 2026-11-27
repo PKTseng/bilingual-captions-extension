@@ -64,6 +64,10 @@ test('a correction that rewrites the line is not trusted', () => {
   assert.equal(ai.plausibleFix('so today', 'This is an entirely different and much longer sentence.'), false);
   assert.equal(ai.plausibleFix('hello', ''), false);
   assert.equal(ai.plausibleFix('hello', undefined), false);
+  for (const other of ['こんにちは', '안녕하세요', 'bonjour']) {
+    assert.equal(ai.plausibleFix('hello', other), false);
+  }
+  assert.equal(ai.plausibleFix('we are goin home', 'We are going home.'), true);
 });
 
 test('auto captions come back corrected, and a rewrite is ignored', async () => {
@@ -110,10 +114,12 @@ test('saved corrections are answered without a request', async () => {
   const { calls, send } = fakeSend();
   const t = ai.createAiTranslator({
     tier: 'ai', getSentences: () => ['a'], send, wait: noWait,
-    seed: new Map([['a', '甲']]), seedSources: new Map([['a', 'A.']]),
+    seed: new Map([['a', '甲'], ['hello', '你好']]), seedSources: new Map([['a', 'A.'], ['hello', 'こんにちは']]),
   });
   assert.equal(await t.translate('a'), '甲');
   assert.equal(t.sourceOf('a'), 'A.');
+  assert.equal(await t.translate('hello'), '你好');
+  assert.equal(t.sourceOf('hello'), undefined);
   assert.equal(calls.length, 0);
 });
 

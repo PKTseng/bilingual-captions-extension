@@ -184,22 +184,33 @@ test('the player button pulses until an AI translation reaches the screen', asyn
   session.respond();
   await flush();
   assert.match(toggle.textContent, /AI…/);
+  assert.equal(session.toast.textContent, '');
   session.go(180);
   assert.match(toggle.textContent, /AI$/);
+  assert.equal(session.toast.textContent, '已切換為 AI 翻譯');
+  assert.equal(session.toast.classList.contains('bce-visible'), true);
   assert.equal(session.indicator.classList.contains('bce-waiting'), false);
   assert.equal(session.line.textContent, 'AI Three');
   session.select('basic');
   await flush();
   assert.match(toggle.textContent, /Chrome$/);
+  assert.equal(session.toast.classList.contains('bce-visible'), false);
 });
 
 test('identical Chrome and AI wording still completes the switch', async () => {
   const session = await playerSession(async (text) => text === 'Two' ? 'AI Two' : '基本 ' + text);
   session.go(2);
   assert.match(session.toggle.textContent, /AI…/);
+  assert.equal(session.toast.textContent, '');
   session.respond();
   await flush();
   assert.match(session.toggle.textContent, /AI$/);
+  assert.equal(session.toast.textContent, '已切換為 AI 翻譯');
+  session.toast.classList.remove('bce-visible'); // After the notification has faded.
+  session.go(180);
+  await flush();
+  assert.equal(session.line.textContent, 'AI Three');
+  assert.equal(session.toast.classList.contains('bce-visible'), false);
 });
 
 test('fallback, original-only mode and stopping clear the AI indicator', async () => {

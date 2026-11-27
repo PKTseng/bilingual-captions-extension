@@ -13,11 +13,12 @@
     en: { code: 'en', label: '英文', spaced: true, charSeconds: 0.065 },
     ja: { code: 'ja', label: '日文', spaced: false, charSeconds: 0.13 },
     ko: { code: 'ko', label: '韓文', spaced: true, charSeconds: 0.13 },
+    th: { code: 'th', label: '泰文', spaced: false, preserveSpaces: true, charSeconds: 0.065 },
   };
   const SOURCE_CODES = Object.keys(LANGUAGES);
   // 'auto' follows the language spoken in the video when it is one of the
   // above, and English otherwise.
-  const PREFERENCES = { auto: '自動', en: '英文', ja: '日文', ko: '韓文' };
+  const PREFERENCES = { auto: '自動', en: '英文', ja: '日文', ko: '韓文', th: '泰文' };
 
   // 'en-US' -> 'en'; undefined for languages without support.
   function normalizeLanguage(code) {
@@ -38,7 +39,9 @@
     const count = (pattern) => (sample.match(pattern) ?? []).length;
     const kana = count(/[぀-ヿㇰ-ㇿ]/g);
     const hangul = count(/[가-힯ᄀ-ᇿ㄰-㆏]/g);
+    const thai = count(/\p{Script=Thai}/gu);
     const latin = count(/[A-Za-z]/g);
+    if (thai > Math.max(kana, hangul) && thai * 3 >= latin) return 'th';
     if (kana && kana * 4 >= latin) return 'ja';
     if (hangul && hangul * 3 >= latin) return 'ko';
     return 'en';

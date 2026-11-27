@@ -83,14 +83,13 @@ async function handleAi({ tier, messages }) {
   return { ok: false, error: 'bad-reply' };
 }
 
-// A first install opens the welcome page; updates and reloads stay quiet.
-chrome.runtime.onInstalled.addListener(({ reason }) => {
-  if (reason !== 'install') return;
-  chrome.tabs.create({ url: chrome.runtime.getURL('welcome.html') })
-    .catch((error) => console.warn('[bce] 無法打開歡迎頁：', error));
-});
-
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === 'bce-seven-knights-terms') {
+    fetch(chrome.runtime.getURL('data/seven-knights-terms.json'))
+      .then((response) => response.ok ? response.json() : null)
+      .then(sendResponse, () => sendResponse(null));
+    return true;
+  }
   // From the player menu's 「API key 與模型設定…」; no reply.
   if (msg?.type === 'bce-open-options') {
     chrome.runtime.openOptionsPage().catch((error) => console.warn('[bce] 無法打開設定頁：', error));

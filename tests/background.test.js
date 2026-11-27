@@ -53,7 +53,7 @@ function loadWorker(env, keys, { stored = {}, usage } = {}) {
     data,
     authHeaders,
     opened,
-    install: (reason) => onInstalled({ reason }),
+    install: (reason) => onInstalled?.({ reason }),
     translate: (tier) => new Promise((resolve) => {
       onMessage({ type: 'bce-ai', tier, messages: [] }, {}, resolve);
     }),
@@ -86,13 +86,12 @@ test('a leftover Gemini key is ignored', async () => {
   assert.deepEqual(worker.authHeaders, []);
 });
 
-test('a first install opens the welcome page, an update does not', () => {
+test('installing or updating the extension never opens a tab', () => {
   const worker = loadWorker(undefined, {});
+  worker.install('install');
   worker.install('update');
   worker.install('chrome_update');
   assert.deepEqual(worker.opened, []);
-  worker.install('install');
-  assert.deepEqual(worker.opened, ['chrome-extension://test/welcome.html']);
 });
 
 test('each reply adds its cost and tokens to this month, even when replies arrive together', async () => {

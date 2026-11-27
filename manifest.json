@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "雙語字幕",
   "version": "0.8.0",
-  "description": "在 YouTube 顯示原文（英文、日文、韓文）和繁體中文雙字幕，可選 Chrome 內建翻譯或 AI 翻譯。",
+  "description": "在 YouTube 顯示原文（英文、日文、韓文、泰文）和繁體中文雙字幕，可選 Chrome 內建翻譯或 AI 翻譯。",
   "permissions": [
     "storage",
     "unlimitedStorage"
@@ -50,6 +50,7 @@
         "transcript.js",
         "page-bridge.js",
         "settings.js",
+        "seven-knights-glossary.js",
         "ai-translator.js",
         "translation-store.js",
         "content.js"

@@ -214,9 +214,8 @@ test('a corrected caption is saved and loaded with its translation', async () =>
     [['so today we', '所以今天我們', 'So today, we'], ['next one', '下一個']]);
 });
 
-test('records from before version 2 are not loaded', async () => {
-  assert.equal(store.VERSION, 2);
-  const area = fakeArea({ 'bceTx1:v|m': { at: 1, lines: [['a', '甲']] } });
+test('translations saved before Korean rank disambiguation are not loaded', async () => {
+  const area = fakeArea({ 'bceTx3:v|m': { at: 1, lines: [['a', '甲']] } });
   const { s } = makeStore(area);
   assert.equal((await saved(s, 'v', 'm')).size, 0);
 });

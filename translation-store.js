@@ -9,7 +9,9 @@
   // made the old way are no longer used (clearAll still removes them).
   // 2: lines may carry the corrected caption, and the prompt has the video's
   // details, the source language and the glossary.
-  const VERSION = 2;
+  // 3: Korean dialogue guidance and context-sensitive game terminology.
+  // 4: distinguish Korean transcendence goals from elapsed seconds.
+  const VERSION = 4;
   const PREFIX = 'bceTx';
   const RECORD_PREFIX = `${PREFIX}${VERSION}:`;
   const INDEX_KEY = `${PREFIX}${VERSION}Index`;

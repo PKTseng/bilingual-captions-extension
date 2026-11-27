@@ -21,7 +21,7 @@
   const { sentenceCues, readTranscript, openTranscript } = globalThis.bceTranscript;
   const { requestTimedText, cachedTimedText, requestVideoDetails, cachedVideoDetails } = globalThis.bcePageBridge;
   const {
-    TIER_LABELS, SETTINGS_KEY, KEYS_KEY, mergeSettings, describeTier, describeModel, describeAiError,
+    TIER_LABELS, SETTINGS_KEY, KEYS_KEY, REQUEST_TIMEOUT_MS, mergeSettings, describeTier, describeModel, describeAiError,
     modelMenuKey, listTranslationModels, parseGlossary, translationProfile,
   } = globalThis.bceSettings;
   const { createAiTranslator, CONTEXT_SIZE, isTransientError } = globalThis.bceAiTranslator;
@@ -32,6 +32,8 @@
   // row (with a growing pause between them) still end in the fallback.
   const AI_FAILURE_LIMIT = 3;
   const AI_RETRY_PAUSE_MS = 4000;
+  // Allow one request and a retry before falling back for a still-visible line.
+  const VISIBLE_AI_TIMEOUT_MS = 2 * REQUEST_TIMEOUT_MS;
   // How far ahead lines are translated. AI batches take seconds and may be
   // retried, so they start further ahead than the built-in translator.
   const LOOKAHEAD = { basic: { seconds: 60, cues: 15 }, ai: { seconds: 150, cues: 60 } };
@@ -55,6 +57,19 @@
   let fontPercent = DEFAULT_FONT_PERCENT;
   // 'auto' or a language code (languages.js); the job's `language` is the one in use.
   let sourcePreference = 'auto';
+  let gameOverride;
+  let gameDictionary;
+  const usesGameTerms = (details) => gameOverride ?? globalThis.bceSevenKnights.isGame(details);
+
+  function loadGameDictionary() {
+    gameDictionary ??= chrome.runtime.sendMessage({ type: 'bce-seven-knights-terms' })
+      .then((pack) => globalThis.bceSevenKnights.prepare(pack))
+      .catch((error) => {
+        gameDictionary = undefined;
+        throw error;
+      });
+    return gameDictionary;
+  }
   // Only the tier and model names are read here (SETTINGS_KEY), never API keys.
   let settings = mergeSettings();
   // Until the page reloads or the keys change: an exhausted balance (402)
@@ -108,6 +123,7 @@
   replay.append(element('span', 'bce-replay-icon')); // Drawn in subtitles.css.
   stage.append(card, replay);
   const copied = element('div', 'bce-copied');
+  const AI_READY_MESSAGE = '已切換為 AI 翻譯';
   copied.setAttribute('role', 'status');
   overlay.append(copied, stage);
   overlay.hidden = true;
@@ -124,8 +140,16 @@
   fileInput.type = 'file';
   fileInput.accept = '.srt,.vtt';
   fileInput.hidden = true;
-  notice.append(message, downloadButton, importButton, fileInput);
+  const closeNotice = element('button', 'bce-notice-close', '×');
+  closeNotice.type = 'button';
+  closeNotice.title = '關閉提示';
+  closeNotice.setAttribute('aria-label', '關閉提示');
+  notice.append(closeNotice, message, downloadButton, importButton, fileInput);
   notice.hidden = true;
+  closeNotice.addEventListener('click', () => {
+    clearTimeout(noticeTimer);
+    notice.hidden = true;
+  });
   // Marks this version's elements; subtitles.css hides unmarked ones left by
   // an older copy of the extension that is still loaded in Chrome.
   for (const item of [toggle, overlay, notice]) item.dataset.bce = 'current';
@@ -240,6 +264,7 @@
       menuItem('source-language', '原文語言', () => showMenuPage('source-language'),
         { value: describePreference(sourcePreference, job?.language), next: true }),
       menuItem('tier', '翻譯', () => showMenuPage('tier'), { value: tierValue(), next: true }),
+      ...(tier === 'ai' ? [gameGlossaryItem()] : []),
       menuItem('font-size', '字幕大小', () => showMenuPage('font-size'),
         { value: `${fontPercent}%`, next: true }),
       menuItem('timing', '字幕時間', () => showMenuPage('timing'),
@@ -258,6 +283,22 @@
 
   // The switch itself happens in onSettingsChanged, so the options page and
   // other tabs follow the same tier; chooseTier retries an AI tier that fell back.
+  function gameGlossaryItem() {
+    const details = job?.details ?? cachedVideoDetails(videoId, sourcePreference) ?? { title: document.title };
+    const enabled = usesGameTerms(details);
+    return menuItem('game-glossary', '本片七騎士詞表', () => {
+      gameOverride = !enabled;
+      cache.clear();
+      corrections.clear();
+      if (job) {
+        stop();
+        nextStartAt = 0;
+        syncPage();
+      }
+      updateMenu();
+    }, { role: 'menuitemcheckbox', checked: enabled, value: enabled ? '開啟' : '關閉' });
+  }
+
   function tierPage() {
     const choices = [{ tier: 'basic' }, ...listTranslationModels(settings)];
     return [
@@ -557,6 +598,11 @@
   }
 
   function updateSourceIndicator() {
+    if (copied.textContent === AI_READY_MESSAGE
+      && (!job?.aiReadyAnnounced || job.fellBack || tier !== 'ai' || translation.hidden)) {
+      copied.classList.remove('bce-visible');
+      copied.textContent = '';
+    }
     let label = '';
     let detail = '';
     let waiting = false;
@@ -614,11 +660,11 @@
   }
 
   let copiedTimer;
-  function flashStatus(text) {
+  function flashStatus(text, duration = 1400) {
     copied.textContent = text;
     copied.classList.add('bce-visible');
     clearTimeout(copiedTimer);
-    copiedTimer = setTimeout(() => copied.classList.remove('bce-visible'), 1400);
+    copiedTimer = setTimeout(() => copied.classList.remove('bce-visible'), duration);
   }
 
   async function copyText(text) {
@@ -779,6 +825,9 @@
       closeMenu(false);
       stop();
       if (nextId !== videoId) {
+        gameOverride = undefined;
+        cache.clear();
+        corrections.clear();
         imported = [];
         importedSource = '';
         advanceSeconds = 0;
@@ -833,6 +882,7 @@
       return;
     }
     active.languageSettled = true;
+    active.waitingForSource = false;
     setJobLanguage(active, timed.language, timed.asr);
     active.cues = timed.cues;
     active.source = timed.source;
@@ -845,14 +895,14 @@
     refresh();
   }
 
-  function readNativeCaption() {
+  function readNativeCaption(expected) {
     const container = player?.querySelector(NATIVE_CAPTIONS);
     if (!container || !container.getClientRects().length) return '';
     const lines = [...container.querySelectorAll(CAPTION_LINES)]
       .map((line) => line.textContent.trim()).filter(Boolean);
-    if (lines.length) return lines.join('\n');
-    return [...container.querySelectorAll('.ytp-caption-segment')]
+    const text = lines.length ? lines.join('\n') : [...container.querySelectorAll('.ytp-caption-segment')]
       .map((part) => part.textContent.trim()).filter(Boolean).join(' ');
+    return matchesSource(text, expected) ? text : '';
   }
 
   function cueIndexAt(cues, time) {
@@ -906,7 +956,7 @@
     translation.textContent = '';
     const pending = !translation.hidden && result === undefined && Boolean(job) && job.fellBack !== 'english';
     translation.classList.toggle('bce-pending', pending);
-    if (pending) translation.textContent = '翻譯中…';
+    if (pending) translation.textContent = downloadButton.hidden || job.preview ? '翻譯中…' : '請點選下載語言模型';
     else if (!result && displayMode === 'chinese' && job?.fellBack === 'english') translation.textContent = '暫無中文譯文';
     else appendWords(translation, result ?? '', chineseWords);
   }
@@ -916,13 +966,17 @@
   function trackDisplayedSource(result) {
     if (!job || translation.hidden) return;
     const selected = result !== undefined && cache.get(shownText) === result;
+    if (selected && tier === 'ai' && job.translator?.kind === 'ai' && !job.fellBack && !job.aiReadyAnnounced) {
+      job.aiReadyAnnounced = true;
+      flashStatus(AI_READY_MESSAGE, 2200);
+    }
     if (job.showingSelected === selected) return;
     job.showingSelected = selected;
     updateSourceIndicator();
   }
 
   function showTranslation(result) {
-    if (held) return;
+    if (held && !translation.classList.contains('bce-pending') && (pressing || selectionInCard())) return;
     if (translation.textContent === result && !translation.classList.contains('bce-pending')) {
       trackDisplayedSource(result);
       return;
@@ -985,7 +1039,7 @@
   function captionTranslation(active, text) {
     const result = cache.get(text);
     const preview = active.preview;
-    if (result !== undefined || !preview || !text) return result;
+    if (result !== undefined || !preview?.translator || !text) return result;
     const local = preview.cache.get(text);
     if (local === undefined && preview.text !== text) {
       preview.controller?.abort();
@@ -1005,8 +1059,12 @@
     }
     if (signal.aborted || job !== active || active.preview !== preview || idFromUrl() !== videoId) return;
     storeTranslation(preview.cache, text, result);
-    const visible = active.cues.length ? currentText : active.live.shown;
-    if (text === visible && !cache.has(text)) showTranslation(result);
+    if (text === visibleCaptionText(active) && !cache.has(text)) showTranslation(result);
+  }
+
+  function visibleCaptionText(active) {
+    if (held) return shownText;
+    return active.cues.length ? currentText : active.live.shown;
   }
 
   function setTimedCaption(active, text, cue) {
@@ -1023,27 +1081,57 @@
     }
   }
 
+  // Finish the line under the pointer even if playback has reached a later
+  // cue, including when Chrome has already supplied a provisional line.
+  function refreshHeldTranslation(active, now) {
+    if (!held || !shownText || translation.hidden || active.showingSelected
+      || (!active.preview && !translation.classList.contains('bce-pending'))) return false;
+    const result = captionTranslation(active, shownText);
+    if (result !== undefined) showTranslation(result);
+    if (cache.has(shownText)) return true;
+    if (active.inFlight && active.inFlight.text !== shownText) active.inFlight.controller.abort();
+    else if (active.translator && !active.inFlight && now >= active.retryAt) void translateCaption(active, shownText);
+    return true;
+  }
+
+  function checkVisibleAiTimeout() {
+    const active = job;
+    if (active?.translator?.kind !== 'ai') return;
+    if (translation.hidden || !overlay.classList.contains('bce-shown') || !translation.classList.contains('bce-pending')) {
+      active.waitingForAi = undefined;
+      return;
+    }
+    const now = performance.now();
+    if (active.waitingForAi?.text !== shownText) {
+      active.waitingForAi = { text: shownText, since: now };
+    } else if (now - active.waitingForAi.since >= VISIBLE_AI_TIMEOUT_MS) {
+      void fallBack(active, { code: 'timeout' });
+    }
+  }
+
   // Whitespace inside Japanese captions only breaks lines, except between
   // Latin words and numbers.
-  function collapseSpaces(text, spaced) {
-    if (spaced) return text.replace(/\s+/g, ' ').trim();
+  function collapseSpaces(text, traits) {
+    if (traits.spaced || traits.preserveSpaces) return text.replace(/\s+/g, ' ').trim();
     return text.trim().replace(/\s+/g, (gap, at, all) =>
       /[A-Za-z0-9]/.test(all[at - 1] ?? '') && /[A-Za-z0-9]/.test(all[at + gap.length] ?? '') ? ' ' : '');
   }
 
   function refreshLive(active, now) {
     const live = active.live;
-    const nativeText = readNativeCaption();
+    const expected = active.preference === 'auto' ? active.details?.language : active.preference;
+    const nativeText = readNativeCaption(expected);
     // Live captions come without a language, so it is found from their text.
     if (!active.languageSettled && nativeText.replace(/\s/g, '').length >= 6) {
       active.languageSettled = true;
       setJobLanguage(active, detectLanguage(nativeText));
     }
     // Words join with spaces, or (Japanese) characters join directly.
-    const { spaced } = traitsOf(active.language);
+    const traits = traitsOf(active.language);
+    const { spaced } = traits;
     const gapText = spaced ? ' ' : '';
     const pieces = (text) => spaced ? text.split(' ') : [...text];
-    const raw = collapseSpaces(nativeText, spaced);
+    const raw = collapseSpaces(nativeText, traits);
     if (raw) live.lastSeen = now;
     if (raw && raw !== live.raw && !live.raw.startsWith(raw + gapText)) {
       const previous = live.raw;
@@ -1057,12 +1145,8 @@
         let overlap = previous ? Math.min(left.length, right.length) : 0;
         while (overlap && left.slice(-overlap).join(gapText) !== right.slice(0, overlap).join(gapText)) overlap--;
         const addition = right.slice(overlap).join(gapText);
-        if (addition && !live.buffer && live.wanted) {
-          live.wanted = '';
-          live.shown = '';
-          active.inFlight?.controller.abort();
-          clearOverlay();
-        }
+        // Keep the last complete sentence eligible for translation while the
+        // next one's words accumulate.
         live.buffer = [live.buffer, addition].filter(Boolean).join(gapText);
       }
       live.raw = raw;
@@ -1075,7 +1159,6 @@
       const sentence = live.buffer;
       live.buffer = '';
       live.wanted = sentence;
-      if (active.inFlight?.text !== sentence) active.inFlight?.controller.abort();
     }
     if (gap) live.raw = '';
     if (gap && now - live.lastSeen >= 2700 && now - (live.shownAt ?? -Infinity) >= 1400) {
@@ -1084,6 +1167,8 @@
       live.shown = '';
     }
     const sentence = live.wanted;
+    if (refreshHeldTranslation(active, now)) return;
+    if (active.inFlight && active.inFlight.text !== sentence) active.inFlight.controller.abort();
     if (!sentence) return;
     const result = captionTranslation(active, sentence);
     if (sentence !== live.shown) {
@@ -1104,15 +1189,17 @@
   function refresh() {
     const active = job;
     const video = player?.querySelector('video');
-    if (!active || !video || idFromUrl() !== videoId || video.seeking) return;
+    if (!active || !video || idFromUrl() !== videoId || video.seeking || active.waitingForSource) return;
     const now = performance.now();
     trackWatching(active, video, now);
     if (active.transcriptUntil && now >= active.nextTranscriptCheck) {
       active.nextTranscriptCheck = now + 200;
-      const { cues, language } = readTranscriptCues(video);
+      const expected = active.preference === 'auto' ? active.details?.language : active.preference;
+      const { cues, language } = readTranscriptCues(video, expected);
       if (cues.length) {
         active.cues = cues;
         active.source = 'YouTube 逐字稿';
+        active.languageSettled = true;
         setJobLanguage(active, language, false);
         updateMenu();
         active.transcriptUntil = 0;
@@ -1134,7 +1221,8 @@
     const cue = cues[index];
     const currentCue = cue && time < cue.end ? cue : undefined;
     const fallback = !currentCue && active.fillGaps
-      ? collapseSpaces(readNativeCaption(), traitsOf(active.language).spaced) : '';
+      ? collapseSpaces(readNativeCaption(active.language), traitsOf(active.language)) : '';
+    if (refreshHeldTranslation(active, now)) return;
     setTimedCaption(active, currentCue?.text ?? fallback, currentCue);
 
     if (currentText && active.translator && !active.receivedCaption) {
@@ -1182,14 +1270,27 @@
     active.prefetch = undefined;
   }
 
-  // The transcript panel's cues, in the chosen language or the one its text is in.
-  function readTranscriptCues(video) {
-    let language = sourcePreference === 'auto' ? undefined : sourcePreference;
+  // The player's live CC and transcript can belong to a different track.
+  function matchesSource(text, expected) {
+    if (!expected || !text) return true;
+    const letters = text.slice(0, 2000).match(/\p{L}/gu);
+    if (!letters) return true;
+    if (expected === 'en') {
+      return letters.filter((letter) => /\p{Script=Latin}/u.test(letter)).length * 2 >= letters.length;
+    }
+    if (expected === 'ja' && letters.every((letter) => /\p{Script=Han}/u.test(letter))) return true;
+    return detectLanguage(text) === expected;
+  }
+
+  function readTranscriptCues(video, expected) {
+    let language = expected;
+    let matches = true;
     const cues = readTranscript(video, (text) => {
+      matches = matchesSource(text, expected);
       language ??= detectLanguage(text);
       return traitsOf(language);
     });
-    return { cues, language };
+    return { cues: matches ? cues : [], language };
   }
 
   // The language became known (a track, the transcript, live text). Chrome's
@@ -1206,6 +1307,7 @@
     if (displayMode === 'original') return;
     if (active.preview) releasePreview(active);
     const builtIn = tier === 'basic' || active.fellBack === 'basic';
+    if (tier === 'ai' && !active.fellBack) void preparePreview(active);
     if (!builtIn || (!active.translator && !active.translatorRequest && !active.fellBack)) return;
     if (tier === 'basic') {
       active.fellBack = undefined;
@@ -1236,7 +1338,7 @@
       storeTranslation(cache, text, result);
       const fixed = translator.sourceOf?.(text);
       if (fixed) storeTranslation(corrections, text, fixed);
-      if (text === currentText || (!active.cues.length && text === active.live.shown)) {
+      if (text === visibleCaptionText(active)) {
         // The corrected caption replaces the one on the card along with its translation.
         if (fixed && !held && shownText === text) resizeSmoothly(() => fillOriginal(text));
         showTranslation(result);
@@ -1266,14 +1368,17 @@
 
   // Invoke create inside the click handler, while Chrome's transient activation is live.
   function waitForModelClick(state, signal, create, language) {
-    downloadButton.textContent = state === 'downloading' ? '繼續下載語言模型' : '點此下載語言模型';
+    downloadButton.textContent = job?.preview ? '下載 Chrome 語言模型以先顯示本機譯文'
+      : state === 'downloading' ? '繼續下載語言模型' : '點此下載語言模型';
     downloadButton.hidden = false;
+    if (translation.classList.contains('bce-pending')) setTranslation(undefined);
     setNotice(`Chrome 需要${languageLabel(language)}翻繁中的語言模型。`);
     return new Promise((resolve, reject) => {
       function cleanup() {
         downloadButton.removeEventListener('click', onClick);
         signal.removeEventListener('abort', onAbort);
         downloadButton.hidden = true;
+        if (translation.classList.contains('bce-pending')) setTranslation(undefined);
         setNotice('');
       }
       function onAbort() {
@@ -1282,7 +1387,7 @@
       }
       function onClick() {
         cleanup();
-        setNotice('正在準備 Chrome 內建翻譯…');
+        if (!job?.preview) setNotice('正在準備 Chrome 內建翻譯…');
         resolve(create());
       }
       signal.addEventListener('abort', onAbort, { once: true });
@@ -1296,8 +1401,14 @@
       // Captured now: the job outlives neither the video nor the model, and
       // a new glossary or fix setting makes a new translator (onSettingsChanged).
       const id = videoId;
+      if (active.pendingDetails) await active.pendingDetails;
+      signal.throwIfAborted();
+      const dictionary = usesGameTerms(active.details) ? await loadGameDictionary() : undefined;
+      signal.throwIfAborted();
+      const personal = parseGlossary(settings.glossary);
+      const overrides = new Set(personal.map(({ source }) => source.toLowerCase()));
       const profile = translationProfile(settings);
-      const model = `${aiModelKey(wanted)}${profile ? `~${profile}` : ''}`;
+      const model = `${aiModelKey(wanted)}${profile ? `~${profile}` : ''}${dictionary ? `~7k-${dictionary.revision}` : ''}`;
       const { translations, sources } = await translationStore.load(id, model);
       return createAiTranslator({
         tier: wanted,
@@ -1305,11 +1416,13 @@
         seedSources: sources,
         onResult: (text, result, fixed) => translationStore.save(id, model, text, result, fixed),
         // Read for every batch: the language may only be known once the track arrives.
-        getContext: () => ({
+        getContext: (lines) => ({
           languageName: languageLabel(active.language),
           fixSource: Boolean(active.asr && settings.fixAsr),
           video: active.details,
-          glossary: parseGlossary(settings.glossary),
+          glossary: personal,
+          gameTerms: dictionary?.forBatch(active.language, lines)
+            .filter(({ source }) => !overrides.has(source.toLowerCase())),
         }),
         // From a little before the current cue, so a line that repeats
         // ("[Music]") is found where the video is, not at its first use.
@@ -1326,7 +1439,7 @@
     const language = active.language;
     const pair = { sourceLanguage: language, targetLanguage: TARGET_LANGUAGE };
     const unsupported = () => Object.assign(new Error('unsupported language pair'), { code: 'unsupported-pair' });
-    const create = async () => Translator.create({
+    const createLocal = () => Translator.create({
       ...pair,
       signal,
       monitor(download) {
@@ -1336,6 +1449,21 @@
         });
       }
     });
+    const create = async () => {
+      const local = await createLocal();
+      if (language !== 'ko') return local;
+      return {
+        async translate(text, options) {
+          const expanded = globalThis.bceSevenKnights.expandKoreanRankGoal(text);
+          if (expanded !== text) {
+            await active.pendingDetails;
+            if (usesGameTerms(active.details ?? document.title)) return local.translate(expanded, options);
+          }
+          return local.translate(text, options);
+        },
+        destroy: () => local.destroy(),
+      };
+    };
     const canAsk = typeof Translator.availability === 'function';
     if (!navigator.userActivation?.isActive && canAsk) {
       const state = await Translator.availability(pair);
@@ -1369,6 +1497,7 @@
   }
 
   function releaseTranslator(active) {
+    active.waitingForAi = undefined;
     active.translatorRequest?.abort();
     active.inFlight?.controller.abort();
     active.translator?.destroy();
@@ -1383,6 +1512,25 @@
     active.preview = undefined;
   }
 
+  async function preparePreview(active) {
+    if (active.preview || !globalThis.Translator) return;
+    const request = new AbortController();
+    const preview = { translatorRequest: request, cache: new Map() };
+    active.preview = preview;
+    try {
+      const translator = await createTranslator(active, 'basic', request.signal);
+      if (request.signal.aborted) {
+        translator.destroy();
+        return;
+      }
+      preview.translator = translator;
+      refresh();
+    } catch {
+      // AI can continue if the local language pair is unavailable.
+      if (active.preview === preview) releasePreview(active);
+    }
+  }
+
   // Replaces the job's translator. Until the new one is ready there is none,
   // so refresh() skips translating; a newer request (tier switch, fallback)
   // or a different job supersedes this one, which then resolves to false.
@@ -1390,7 +1538,7 @@
     releaseTranslator(active);
     active.aiFailures = 0;
     active.retryAt = 0;
-    if (wanted === 'basic' && active.preview) {
+    if (wanted === 'basic' && active.preview?.translator) {
       const preview = active.preview;
       preview.controller?.abort();
       active.translator = preview.translator;
@@ -1401,6 +1549,8 @@
       active.live.shown = '';
       return true;
     }
+    if (wanted === 'basic') releasePreview(active);
+    else void preparePreview(active);
     const request = new AbortController();
     active.translatorRequest = request;
     const current = () => job === active && !request.signal.aborted;
@@ -1472,6 +1622,7 @@
     tier = next;
     cache = new Map();
     if (job) {
+      job.aiReadyAnnounced = false;
       job.fellBack = undefined;
       job.fallbackCode = undefined;
       job.showingSelected = false;
@@ -1663,7 +1814,8 @@
     // of the page below when not known yet.
     const details = cachedVideoDetails(id, preference);
     const timed = !imported.length ? cachedTimedText(id, preference) : undefined;
-    const transcript = !imported.length && !timed ? readTranscriptCues(video) : undefined;
+    const expected = preference === 'auto' ? details?.language : preference;
+    const transcript = !imported.length && !timed ? readTranscriptCues(video, expected) : undefined;
     const cues = imported.length ? imported : timed?.cues ?? transcript.cues;
     // Until the track (or live text) shows the language, this is a guess.
     const language = normalizeLanguage(imported.length ? importedLanguage
@@ -1700,17 +1852,29 @@
       preference,
       language,
       asr: Boolean(timed?.asr),
-      languageSettled: Boolean(cues.length) || preference !== 'auto',
+      languageSettled: Boolean(cues.length || expected),
+      waitingForSource: !details && !imported.length && !timed && preference === 'auto',
       details,
       watchedMs: 0,
     };
     job = active;
     original.lang = language;
     if (!details) {
-      void requestVideoDetails(id, preference).then((found) => {
+      active.pendingDetails = requestVideoDetails(id, preference).then((found) => {
         if (job !== active) return;
         active.details = found;
-        if (!active.languageSettled && found.language) setJobLanguage(active, found.language);
+        if (active.waitingForSource) {
+          active.waitingForSource = false;
+          if (found.language) {
+            if (active.cues.length) {
+              active.cues = readTranscriptCues(video, found.language).cues;
+              if (!active.cues.length) active.source = '即時 CC';
+            }
+            active.languageSettled = true;
+            setJobLanguage(active, found.language);
+          }
+          refresh();
+        }
       });
     }
     updateToggle();
@@ -1730,9 +1894,10 @@
     }
     try {
       if (!(await installTranslator(active, tier))) return;
-      setNotice(active.cues.length
+      setPassingNotice(active.cues.length
         ? '已取得時間碼，字幕會跟著影片時間切換。'
-        : '播放影片測試。即時 CC 會用播放器字幕選單選的語言當原文。');
+        : active.languageSettled ? `等待${languageLabel(active.language)}字幕。可在 YouTube 字幕選單選擇同語言的 CC。`
+          : '等待播放器的即時 CC。');
       refresh();
     } catch (error) {
       if (job !== active) return;
@@ -1807,6 +1972,7 @@
     syncPage();
     guardNativeCc();
     refresh();
+    checkVisibleAiTimeout();
   }, 75);
 
   // Only one copy may run: a copy that loads later (another install of this

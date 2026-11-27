@@ -55,7 +55,7 @@
   }
 
   // Kept in step with languages.js, which the page world does not load.
-  const SOURCE_CODES = ['en', 'ja', 'ko'];
+  const SOURCE_CODES = ['en', 'ja', 'ko', 'th'];
   const baseLanguage = (code) => String(code ?? '').toLowerCase().split(/[-_]/)[0];
   // A copy of content.js from before languages existed asks for English.
   const wantedLanguage = (value) => value === 'auto' || SOURCE_CODES.includes(value) ? value : 'en';
@@ -67,26 +67,34 @@
 
   const captionTracks = (response) => response?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
 
-  // The order to try tracks in. 'auto' starts with the language spoken in the
-  // video (the one its auto-generated track is in), then English, then the
-  // other supported ones. Human-made tracks come before auto-generated ones.
-  function rankTracks(tracks, wanted) {
-    const spoken = baseLanguage(tracks.find((track) => track.kind === 'asr')?.languageCode);
-    const order = wanted !== 'auto' ? [wanted]
-      : [...new Set([SOURCE_CODES.includes(spoken) ? spoken : 'en', 'en', ...SOURCE_CODES])];
-    return order.flatMap((code) => tracks.filter((track) => baseLanguage(track.languageCode) === code)
-      .sort((a, b) => (a.kind === 'asr') - (b.kind === 'asr')));
+  function sourceLanguage(response, wanted) {
+    if (wanted !== 'auto') return wanted;
+    // On dubbed videos YouTube identifies original audio as <language>.4.
+    const renderer = response?.captions?.playerCaptionsTracklistRenderer;
+    const audioIds = [
+      ...(renderer?.audioTracks ?? []).map((track) => track.audioTrackId),
+      ...(response?.streamingData?.adaptiveFormats ?? []).map((format) => format.audioTrack?.id),
+    ];
+    const original = audioIds.find((id) => typeof id === 'string' && id.endsWith('.4'));
+    const tracks = captionTracks(response);
+    if (!original && !tracks.length) return undefined;
+    const asr = tracks.filter((track) => track.kind === 'asr');
+    const candidates = new Set((asr.length ? asr : tracks).map((track) => baseLanguage(track.languageCode)));
+    const language = original ? baseLanguage(original.slice(0, -2))
+      : candidates.size === 1 ? [...candidates][0] : undefined;
+    return SOURCE_CODES.includes(language) ? language : 'en';
   }
 
   function videoDetails(videoId, wanted) {
     const response = playerResponse(videoId);
     const details = response?.videoDetails;
-    const best = rankTracks(captionTracks(response), wanted)[0];
+    const language = sourceLanguage(response, wanted);
+    const available = captionTracks(response).some((track) => baseLanguage(track.languageCode) === language);
     return {
       title: String(details?.title ?? ''),
       channel: String(details?.author ?? ''),
       description: String(details?.shortDescription ?? ''),
-      language: best ? baseLanguage(best.languageCode) : undefined,
+      language: wanted === 'auto' || available ? language : undefined,
     };
   }
 
@@ -120,17 +128,19 @@
   }
 
   async function load(videoId, wanted) {
-    const all = captionTracks(playerResponse(videoId));
-    const listed = rankTracks(all, wanted);
+    const response = playerResponse(videoId);
+    const all = captionTracks(response);
+    const base = captured.get(videoId);
+    const params = base && new URL(base).searchParams;
+    const capturedAsr = params?.get('kind') === 'asr' && baseLanguage(params.get('lang'));
+    const language = sourceLanguage(response, wanted) ?? (SOURCE_CODES.includes(capturedAsr) ? capturedAsr : 'en');
+    const listed = all.filter((track) => baseLanguage(track.languageCode) === language)
+      .sort((a, b) => (a.kind === 'asr') - (b.kind === 'asr'));
     // The player lists its tracks, and none is in this language.
     if (all.length && !listed.length) return { error: 'empty' };
-    const base = captured.get(videoId);
     if (!listed.length && !base) return { error: 'no-token' };
-    // Without a track list, guess from the language the player itself asked for.
-    const playerLanguage = base && baseLanguage(new URL(base).searchParams.get('lang'));
-    const guess = wanted !== 'auto' ? wanted : SOURCE_CODES.includes(playerLanguage) ? playerLanguage : 'en';
     const tracks = listed.length ? listed
-      : [{ languageCode: guess }, { languageCode: guess, kind: 'asr' }];
+      : [{ languageCode: language }, { languageCode: language, kind: 'asr' }];
     for (const track of tracks) {
       const events = await download(trackUrl(track, base));
       if (events) {
